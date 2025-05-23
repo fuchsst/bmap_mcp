@@ -1,0 +1,103 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+.python-version
+*.egg-info/
+*.egg
+*.whl
+dist/
+build/
+
+# Virtual environments
+.conda/
+.venv/
+venv/
+env/
+ENV/
+
+# Testing and coverage
+.coverage
+.coverage.*
+htmlcov/
+.coverage
+coverage.xml
+.pytest_cache/
+.mypy_cache/
+.junit.xml
+
+# Documentation
+site/
+mkdocs_serve.yml
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.envrc
+
+# Editor and IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# Dependency directories
+node_modules/
+bower_components/
+.hypothesis/
+
+# Logs and databases
+*.log
+logs/
+*.sqlite
+*.db
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Local development
+local_settings.py
+settings.local.yaml
+
+# Compiled files
+*.so
+*.pyc
+*.pyd
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Bandit security tool
+.bandit
+
+# Profiling results
+.profile
+
+# macOS folder attributes
+**/.localized
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Pre-commit hooks
+.pre-commit-config.yaml
+
+# Project-specific patterns
+/instance/
+.webassets-cache
+
+# Experiment tracking
+mlruns/
+
+# BMAD MCP Server specific
+.bmad/
+config/server.json
