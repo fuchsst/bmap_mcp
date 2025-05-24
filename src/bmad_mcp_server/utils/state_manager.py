@@ -42,14 +42,80 @@ class StateManager:
         self.project_root = project_root or Path.cwd()
         self.bmad_dir_name = ".bmad"
         self.bmad_dir = self.project_root / self.bmad_dir_name
-        self._lock = asyncio.Lock()  # For concurrent access protection
+        self._lock = None  # Will be initialized when needed
+        self._initialized = False
         
-        # Ensure directory structure exists
-        asyncio.create_task(self._ensure_structure())
+        # Try to ensure structure synchronously first
+        try:
+            self._ensure_structure_sync()
+        except Exception as e:
+            logger.warning(f"Sync initialization failed, will try async later: {e}")
+    
+    def _ensure_structure_sync(self) -> None:
+        """Ensure .bmad directory structure exists (synchronous version)."""
+        directories = [
+            self.bmad_dir,
+            self.bmad_dir / "prd",
+            self.bmad_dir / "stories", 
+            self.bmad_dir / "architecture",
+            self.bmad_dir / "decisions",
+            self.bmad_dir / "ideation",
+            self.bmad_dir / "checklists",
+            self.bmad_dir / "templates",
+        ]
+        
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
+        
+        meta_path = self.bmad_dir / "project_meta.json"
+        if not meta_path.exists():
+            self._init_project_meta_sync()
+        
+        self._initialized = True
+        logger.info(f"Initialized BMAD directory structure at {self.bmad_dir}")
+    
+    def _init_project_meta_sync(self) -> None:
+        """Initialize project metadata file (synchronous version)."""
+        meta = {
+            "project_name": self.project_root.name,
+            "bmad_version": "1.0",
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "current_phase": "initialization",
+            "artifact_paths": {
+                "prd": "prd/",
+                "stories": "stories/",
+                "architecture": "architecture/",
+                "decisions": "decisions/",
+                "ideation": "ideation/",
+                "checklists": "checklists/"
+            },
+            "artifact_count": {
+                "prd": 0,
+                "stories": 0,
+                "architecture": 0,
+                "decisions": 0,
+                "ideation": 0,
+                "checklists": 0
+            }
+        }
+        
+        meta_path = self.bmad_dir / "project_meta.json"
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Initialized BMAD project metadata for '{meta['project_name']}'")
+    
+    async def _get_lock(self):
+        """Get or create the async lock."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
     
     async def _ensure_structure(self) -> None:
         """Ensure .bmad directory structure exists."""
-        async with self._lock:
+        lock = await self._get_lock()
+        async with lock:
             directories = [
                 self.bmad_dir,
                 self.bmad_dir / "prd",
@@ -113,7 +179,8 @@ class StateManager:
         Returns:
             Absolute path to the saved file
         """
-        async with self._lock:
+        lock = await self._get_lock()
+        async with lock:
             full_path = self.bmad_dir / path_in_bmad
             full_path.parent.mkdir(parents=True, exist_ok=True)
             
@@ -188,7 +255,8 @@ class StateManager:
         Returns:
             Absolute path to the saved file
         """
-        async with self._lock:
+        lock = await self._get_lock()
+        async with lock:
             full_path = self.bmad_dir / path_in_bmad
             full_path.parent.mkdir(parents=True, exist_ok=True)
             
@@ -318,7 +386,8 @@ class StateManager:
             True if deleted successfully, False otherwise
         """
         try:
-            async with self._lock:
+            lock = await self._get_lock()
+            async with lock:
                 full_path = self.bmad_dir / path_in_bmad
                 if full_path.exists():
                     full_path.unlink()

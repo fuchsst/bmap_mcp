@@ -53,6 +53,11 @@ class CreateProjectBriefTool(BMadTool):
                     "enum": ["minimal", "standard", "comprehensive"],
                     "description": "Desired scope level for the brief",
                     "default": "standard"
+                },
+                "additional_context": {
+                    "type": "string",
+                    "description": "Additional context, requirements, or information to include in the brief generation",
+                    "default": ""
                 }
             },
             "required": ["topic"]
@@ -66,25 +71,71 @@ class CreateProjectBriefTool(BMadTool):
         target_audience = validated_args.get("target_audience", "General users")
         constraints = validated_args.get("constraints", [])
         scope_level = validated_args.get("scope_level", "standard")
+        additional_context = validated_args.get("additional_context", "")
         
         logger.info(f"Generating project brief content for: {topic}")
 
         # Get project name from state_manager for context, if available
-        project_meta = self.state_manager.get_project_meta()
+        project_meta = await self.state_manager.get_project_meta()
         project_name = project_meta.get("project_name", "the current project")
+        
+        # Check for existing project brief content - simplified to avoid path issues
+        existing_brief_content = ""
+        try:
+            # Try to find existing project briefs using direct file system access
+            ideation_dir = self.state_manager.get_bmad_dir() / "ideation"
+            if ideation_dir.exists():
+                # Find markdown files that contain "project_brief" in the name
+                brief_files = list(ideation_dir.glob("*project_brief*.md"))
+                if brief_files:
+                    # Use the most recently modified file
+                    latest_brief_file = max(brief_files, key=lambda f: f.stat().st_mtime)
+                    relative_path = latest_brief_file.relative_to(self.state_manager.get_bmad_dir())
+                    brief_data = await self.state_manager.load_artifact(str(relative_path))
+                    existing_brief_content = brief_data["content"]
+                    logger.info(f"Found existing project brief: {relative_path}")
+        except Exception as e:
+            logger.debug(f"No existing project brief found or error loading: {e}")
         
         # Create analyst agent using the passed CrewAIConfig
         analyst = get_analyst_agent(config=self.crew_ai_config)
         
+        # Build context sections for the task
+        context_sections = []
+        
+        if existing_brief_content:
+            context_sections.append(f"""
+EXISTING PROJECT BRIEF CONTENT:
+---
+{existing_brief_content}
+---
+
+Please review the existing content above and either:
+- Update/refine it based on the new requirements
+- Expand it with additional details
+- Restructure it if needed
+""")
+        
+        if additional_context:
+            context_sections.append(f"""
+ADDITIONAL CONTEXT PROVIDED:
+---
+{additional_context}
+---
+
+Please incorporate this additional context into the project brief.
+""")
+        
+        context_text = "\n".join(context_sections)
+        
         # Define the CrewAI task
-        # Template content can be loaded here or be part of the agent's default knowledge/prompting
-        # For simplicity, embedding structure in prompt.
-        # template_content = load_template("project_brief_tmpl.md") # If using external template
         task_description = f"""
         Create a comprehensive project brief for the topic: '{topic}' for project '{project_name}'.
         Target audience: {target_audience}
         Known constraints: {', '.join(constraints) if constraints else 'None specified'}
         Scope level: {scope_level}
+        
+        {context_text}
         
         Follow a standard BMAD project brief template structure, including sections for:
         1. Introduction / Problem Statement

@@ -56,6 +56,32 @@ This is the simplest way to get the server running.
     ```
     Ensure you provide at least one LLM API key that your CrewAI agents are configured to use.
 
+    **Configuring LLMs for CrewAI Agents:**
+
+    The BMAD MCP Server uses CrewAI, which in turn can leverage various Large Language Models (LLMs) for its agents. You can configure a default LLM and agent-specific LLMs via environment variables. These variables expect string identifiers that CrewAI can resolve (e.g., "openai/gpt-4o-mini", "anthropic/claude-3-opus-20240229", "ollama/mistral").
+
+    -   `BMAD_DEFAULT_LLM`: Sets the default LLM for all agents if no specific LLM is defined for an agent.
+        Example: `BMAD_DEFAULT_LLM=anthropic/claude-3-5-haiku-20241022`
+    -   `BMAD_ANALYST_AGENT_LLM`: Specific LLM for the Analyst agent.
+        Example: `BMAD_ANALYST_AGENT_LLM=gemini/gemini-2-5-flash-preview-05-20`
+    -   `BMAD_PM_AGENT_LLM`: Specific LLM for the Product Manager agent.
+        Example: `BMAD_PM_AGENT_LLM=anthropic/claude-3-7-sonnet-20250219`
+    -   `BMAD_ARCHITECT_AGENT_LLM`: Specific LLM for the Architect agent.
+        Example: `BMAD_ARCHITECT_AGENT_LLM=google/gemini-2.5-pro-preview-05-06`
+    -   *(Add similar variables for other agents like `BMAD_DEVELOPER_AGENT_LLM`, `BMAD_QA_AGENT_LLM` as they are defined in `src/bmad_mcp_server/crewai_integration/config.py`)*
+
+    If an agent-specific LLM variable is not set, the agent will use the `BMAD_DEFAULT_LLM`. If `BMAD_DEFAULT_LLM` is also not set, it will fall back to the default specified in `config.py` (currently "openai/gpt-4o-mini").
+
+    Add these to your `.env` file as needed:
+    ```env
+    # ... (other API keys) ...
+
+    # CrewAI LLM Configuration Examples
+    BMAD_DEFAULT_LLM=openai/gpt-4o-mini
+    BMAD_PM_AGENT_LLM=anthropic/claude-3-sonnet-20240229
+    # BMAD_ARCHITECT_AGENT_LLM=ollama/llama3 # If you have Ollama running with llama3
+    ```
+
 3.  **Run with Docker Compose**:
     Docker Compose will build the image and run the server.
     *   **For SSE Mode** (Server-Sent Events - recommended for most AI assistants that connect via HTTP):
@@ -98,6 +124,10 @@ If you prefer not to use Docker, you can set up a local Python environment.
     export ANTHROPIC_API_KEY="your_anthropic_api_key_here"
     # Add other keys (GEMINI_API_KEY, AWS keys) as needed
     export BMAD_LOG_LEVEL="INFO"
+    
+    # Optionally, configure CrewAI LLMs (see .env examples above for format)
+    # export BMAD_DEFAULT_LLM="openai/gpt-4o-mini"
+    # export BMAD_PM_AGENT_LLM="anthropic/claude-3-sonnet-20240229"
     ```
     On Windows, use `set OPENAI_API_KEY=your_openai_api_key_here` or manage them through system environment variable settings.
 

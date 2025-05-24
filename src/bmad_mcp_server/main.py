@@ -63,7 +63,7 @@ def main(mode, host, port, config, project_root, log_level):
     setup_logging(level=log_level)
     
     try:
-        # Create and run server
+        # Create and run server for all modes
         asyncio.run(_run_server(mode, host, port, config, project_root))
     except KeyboardInterrupt:
         console.print("\n[yellow]Server stopped by user[/yellow]")
@@ -86,12 +86,12 @@ async def _run_server(mode, host, port, config, project_root):
         if project_root:
             console.print(f"[blue]Project root: {project_root}[/blue]")
         
-        # Start server in requested mode
-        if mode == "stdio":
-            await server.run_stdio()
-        elif mode == "sse":
+        # Add URL info for SSE mode
+        if mode == "sse":
             console.print(f"[blue]Server URL: http://{host}:{port}[/blue]")
-            await server.run_sse(host=host, port=port)
+        
+        # Start server in requested mode
+        await server.run(mode=mode, host=host, port=port)
             
     except Exception as e:
         logger.error(f"Server error: {e}")

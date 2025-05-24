@@ -52,25 +52,26 @@ class BMadMCPServer:
         self.config = self._load_config(config_path)
         self.project_root = project_root or Path.cwd()
         
-        # Initialize components
-        self.state_manager = StateManager(project_root=self.project_root)
-        self.crewai_config = CrewAIConfig() # TODO: Pass LLM configs from server_config to crewai_config
-        self.mcp = FastMCP("BMAD-Server", version="1.0.0")
-        
-        # Setup logging
+        # Setup logging first
         log_level = self.config.get("log_level", "INFO")
         log_file = self.config.get("log_file")
         if log_file:
             log_file = Path(log_file)
         setup_logging(level=log_level, log_file=log_file)
         
-        # Register all BMAD tools
+        # Initialize components
+        self.state_manager = StateManager(project_root=self.project_root)
+        self.crewai_config = CrewAIConfig() # TODO: Pass LLM configs from server_config to crewai_config
+        
+        # Initialize FastMCP server
+        self.mcp = FastMCP("BMAD-Server", version="1.0.0")
+        
+        # Register all BMAD tools BEFORE any server operations
         self._register_native_tools()
         
         logger.info("BMAD MCP Server initialized successfully")
         logger.info(f"Project root: {self.project_root}")
-        # FastMCP handles tool listing, so self.tools might not be needed in the same way
-        # logger.info(f"Registered tools via FastMCP decorators") 
+        logger.info("All tools registered and ready")
     
     def _load_config(self, config_path: Optional[Path]) -> Dict[str, Any]:
         """Load server configuration."""
@@ -104,7 +105,8 @@ class BMadMCPServer:
             topic: str,
             target_audience: Optional[str] = "General users",
             constraints: Optional[List[str]] = None, # Handled by Field(default_factory=list) in Pydantic
-            scope_level: Literal["minimal", "standard", "comprehensive"] = "standard"
+            scope_level: Literal["minimal", "standard", "comprehensive"] = "standard",
+            additional_context: Optional[str] = ""
         ) -> Dict[str, Any]:
             """Generate a structured project brief following BMAD methodology."""
             tool_instance = CreateProjectBriefTool(self.state_manager, self.crewai_config)
@@ -113,12 +115,13 @@ class BMadMCPServer:
                 "topic": topic,
                 "target_audience": target_audience,
                 "constraints": constraints or [], # Ensure list if None
-                "scope_level": scope_level
+                "scope_level": scope_level,
+                "additional_context": additional_context or ""
             })
 
         @self.mcp.tool()
         async def generate_prd(
-            project_brief_content: str, # Renamed from project_brief in original tool schema
+            project_brief_content: str, 
             workflow_mode: Literal["incremental", "yolo"] = "incremental",
             technical_depth: Literal["basic", "standard", "detailed"] = "standard",
             include_architecture_prompt: bool = True
@@ -152,7 +155,7 @@ class BMadMCPServer:
         @self.mcp.tool()
         async def create_architecture(
             prd_content: str,
-            tech_preferences: Optional[TechPreferences] = None, # Pydantic model
+            tech_preferences: Optional[TechPreferences] = None,
             architecture_type: Literal["monolith", "modular_monolith", "microservices", "serverless"] = "monolith",
             include_frontend_prompt: bool = True
         ) -> Dict[str, Any]:
@@ -259,30 +262,41 @@ class BMadMCPServer:
         
         logger.info(f"Registered tools.")
 
-    async def run_stdio(self) -> None:
-        """Run the server in stdio mode."""
-        logger.info("Starting BMAD MCP Server in stdio mode")
+    async def initialize(self) -> None:
+        """Ensure all components are properly initialized."""
+        logger.info("Initializing server components...")
+        
+        # Give a small delay to ensure all decorators are processed
+        await asyncio.sleep(0.1)
+        
+        # Verify state manager is ready
+        if not hasattr(self.state_manager, 'project_root'):
+            raise RuntimeError("StateManager not properly initialized")
+            
+        # Verify CrewAI config is ready
+        if not hasattr(self.crewai_config, 'llm'):
+            logger.warning("CrewAI config may not be fully initialized")
+            
+        logger.info("Server initialization complete")
+
+    async def run(self, mode: str = "stdio", host: str = "localhost", port: int = 8000) -> None:
+        """Run the server in the specified mode."""
+        logger.info(f"Starting BMAD MCP Server in {mode} mode")
+        
+        # Ensure proper initialization before starting
+        await self.initialize()
         
         try:
-            # Use FastMCP's async stdio runner
-            await self.mcp.run_stdio_async()
+            if mode == "stdio":
+                await self.mcp.run_stdio_async()
+            elif mode == "sse":
+                await self.mcp.run_sse_async(host=host, port=port)
+            else:
+                raise ValueError(f"Unsupported mode: {mode}")
         except KeyboardInterrupt:
             logger.info("Server stopped by user")
         except Exception as e:
-            logger.error(f"Server error in stdio mode: {e}")
-            raise
-    
-    async def run_sse(self, host: str = "localhost", port: int = 8000) -> None:
-        """Run the server in Server-Sent Events mode."""
-        logger.info(f"Starting BMAD MCP Server in SSE mode on {host}:{port}")
-        
-        try:
-            # Use FastMCP's async HTTP runner
-            await self.mcp.run_http_async(transport="streamable-http", host=host, port=port)
-        except KeyboardInterrupt:
-            logger.info("Server stopped by user")
-        except Exception as e:
-            logger.error(f"Server error in SSE mode: {e}")
+            logger.error(f"Server error in {mode} mode: {e}")
             raise
 
     
