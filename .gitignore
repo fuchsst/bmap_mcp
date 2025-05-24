@@ -99,5 +99,4 @@ settings.local.yaml
 mlruns/
 
 # BMAD MCP Server specific
-.bmad/
 config/server.json
