@@ -7,7 +7,8 @@ from typing import Any, Dict, Optional
 from datetime import datetime
 import logging
 
-from bmad_mcp_server.utils.state_manager import StateManager
+from ..utils.state_manager import StateManager
+from ..crewai_integration.config import CrewAIConfig
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +21,21 @@ class BMadTool(ABC):
     This ensures consistent interface and behavior across all tools.
     """
     
-    def __init__(self, state_manager:Optional[StateManager]=None):
+    def __init__(self, state_manager: StateManager, crew_ai_config: CrewAIConfig):
         """
         Initialize BMAD tool.
         
         Args:
-            state_manager: StateManager instance for artifact persistence
+            state_manager: StateManager instance for artifact persistence and context reading.
+            crew_ai_config: CrewAIConfig instance for agent configurations.
         """
+        if state_manager is None:
+            raise ValueError("StateManager instance is required for BMadTool.")
+        if crew_ai_config is None:
+            raise ValueError("CrewAIConfig instance is required for BMadTool.")
+            
         self.state_manager = state_manager
+        self.crew_ai_config = crew_ai_config
         
         # Tool name derived from class name (e.g., CreateProjectBriefTool -> create_project_brief)
         class_name = self.__class__.__name__
@@ -46,15 +54,20 @@ class BMadTool(ABC):
         logger.debug(f"Initialized tool: {self.name}")
     
     @abstractmethod
-    async def execute(self, arguments: Dict[str, Any]) -> str:
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute the tool with given arguments.
+        Should return a dictionary containing:
+        - 'content': The generated artifact content (e.g., Markdown string).
+        - 'suggested_path': A string suggesting where the artifact might be saved (relative to .bmad).
+        - 'metadata': A dictionary of metadata for the artifact (e.g., type, status).
+        - 'message': (Optional) A message for the user/assistant.
         
         Args:
             arguments: Tool input arguments validated against input schema
             
         Returns:
-            Tool execution result as string
+            A dictionary with the tool's output.
             
         Raises:
             Exception: If tool execution fails
@@ -100,23 +113,24 @@ class BMadTool(ABC):
         
         return arguments
     
-    def create_metadata(self, status: str = "draft", **kwargs) -> Dict[str, Any]:
+    def create_suggested_metadata(self, artifact_type: str, status: str = "draft", **kwargs) -> Dict[str, Any]:
         """
-        Create standard metadata for artifacts.
+        Create standard suggested metadata for artifacts to be returned to the assistant.
         
         Args:
-            status: Artifact status (draft, review, approved, etc.)
+            artifact_type: The type of artifact (e.g., "project_brief", "prd").
+            status: Suggested artifact status (draft, review, approved, etc.)
             **kwargs: Additional metadata fields
             
         Returns:
-            Metadata dictionary with standard fields
+            Metadata dictionary with standard fields for suggestion.
         """
         metadata = {
+            "artifact_type": artifact_type,
             "status": status,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "created_by": "BMAD-MCP-Server",
-            "tool_name": self.name,
+            "suggested_created_at": datetime.now().isoformat(),
+            "suggested_updated_at": datetime.now().isoformat(),
+            "generated_by_tool": self.name,
             "bmad_version": "1.0"
         }
         metadata.update(kwargs)

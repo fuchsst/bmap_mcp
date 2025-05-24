@@ -1,14 +1,18 @@
 """
 Story creation tool using BMAD methodology.
+Returns generated content and suggestions to the assistant.
 """
 
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, List, Optional, Literal
+from datetime import datetime
 from crewai import Agent, Crew, Task, Process
 from pydantic import BaseModel, Field
 import logging
 
 from ..base import BMadTool
-from ...crewai_integration.agents import get_pm_agent
+from ...crewai_integration.agents import get_pm_agent # Or get_developer_agent
+from ...crewai_integration.config import CrewAIConfig
 from ...utils.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
@@ -16,9 +20,8 @@ logger = logging.getLogger(__name__)
 
 class CurrentProgress(BaseModel):
     """Model for tracking current project progress."""
-    completed_stories: List[str] = Field(default_factory=list, description="List of completed story IDs")
-    current_epic: int = Field(default=1, description="Current epic number being worked on")
-    epic_progress: Dict[str, Any] = Field(default_factory=dict, description="Progress within current epic")
+    completed_stories: List[str] = Field(default_factory=list, description="List of completed story IDs or titles")
+    current_epic: int = Field(default=1, description="Current epic number being worked on (1-indexed)")
 
 
 class CreateStoryRequest(BaseModel):
@@ -41,211 +44,165 @@ class CreateStoryRequest(BaseModel):
 
 class CreateNextStoryTool(BMadTool):
     """
-    Generate development-ready user stories using BMAD methodology.
-    
-    This tool creates detailed user stories with technical guidance, acceptance criteria,
-    and implementation notes based on PRD epics and architecture context.
+    Generates content for the next development-ready user story based on PRD and architecture.
+    This tool uses AI to analyze the PRD, architecture, and current progress
+    to generate a well-defined user story with acceptance criteria and technical notes.
     """
     
-    def __init__(self, state_manager: StateManager):
-        super().__init__(state_manager)
+    def __init__(self, state_manager: StateManager, crew_ai_config: CrewAIConfig):
+        super().__init__(state_manager, crew_ai_config)
         self.category = "story"
-        self.description = "Generate development-ready user stories from PRD epics"
+        self.description = "Generates content for a user story. Does not write files."
     
     def get_input_schema(self) -> Dict[str, Any]:
         """Get input schema for story creation using Pydantic model."""
         schema = CreateStoryRequest.model_json_schema()
-        # Add enum constraints
+        # Ensure enums are correctly represented
         schema["properties"]["story_type"]["enum"] = ["feature", "bug", "technical", "research", "epic"]
         schema["properties"]["priority"]["enum"] = ["low", "medium", "high", "critical"]
         return schema
     
-    async def execute(self, arguments: Dict[str, Any]) -> str:
-        """Execute story creation."""
-        # Validate input using Pydantic
-        request = CreateStoryRequest(**arguments)
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute story generation and return content and suggestions."""
+        try:
+            args = CreateStoryRequest(**arguments)
+        except Exception as e:
+            logger.error(f"Input validation failed for CreateNextStoryTool: {e}", exc_info=True)
+            raise ValueError(f"Invalid arguments for CreateNextStoryTool: {e}")
+
+        logger.info(f"Generating next story content for epic {args.current_progress.current_epic}, type '{args.story_type}', priority '{args.priority}'")
         
-        logger.info(f"Creating next story for epic {request.current_progress.current_epic}")
-        
-        # Analyze PRD to identify next story
-        next_story_context = self._analyze_next_story_context(
-            request.prd_content,
-            request.current_progress
+        next_story_context_data = self._analyze_next_story_context(
+            args.prd_content,
+            args.current_progress
         )
         
-        if not next_story_context:
-            return "No more stories to create. All epics appear to be complete."
+        if not next_story_context_data:
+            return {
+                "content": "No more stories to create based on the provided PRD and progress. All epics appear to be complete or no further stories were identified.",
+                "suggested_path": None, # No file to suggest
+                "metadata": self.create_suggested_metadata(artifact_type="story_generation_status", status="completed_no_story"),
+                "message": "Story generation complete: No further stories identified."
+            }
         
-        # Create PM agent for story generation
-        pm_agent = get_pm_agent()
+        # Using PM agent for story writing, could also be a Developer agent
+        story_writer_agent = get_pm_agent(config=self.crew_ai_config) 
         
-        # Create story generation task
+        progress_info_str = (
+            f"Current Progress:\n"
+            f"- Current Epic Number: {args.current_progress.current_epic}\n"
+            f"- Completed Stories in this Epic (titles/IDs): {', '.join(args.current_progress.completed_stories) if args.current_progress.completed_stories else 'None yet'}\n"
+        )
+
+        task_description = f"""
+        Based on the provided Product Requirements Document (PRD) and Technical Architecture, generate the next logical user story.
+        The context for the next story to be generated is: {json.dumps(next_story_context_data, indent=2)}
+        Consider the overall progress: {progress_info_str}
+
+        PRD Content (excerpt relevant to current epic might be better if PRD is very large):
+        {args.prd_content}
+
+        Architecture Content (relevant parts):
+        {args.architecture_content}
+        
+        Story Parameters for the new story:
+        - Story Type: {args.story_type}
+        - Priority: {args.priority}
+
+        Follow the BMAD user story template:
+        1. Story Header (ID: [e.g., EPIC{next_story_context_data.get('epic_number', 'X')}-STORY{next_story_context_data.get('story_sequence_in_epic', 'Y')}], Title: [Clear, concise title based on story_description], Epic: [{next_story_context_data.get('epic_title', 'N/A')}])
+        2. User Story Statement ("As a [type of user], I want [an action] so that [a benefit/value]" - based on story_description)
+        3. Story Context and Background (Briefly elaborate on the story_description)
+        4. Detailed Acceptance Criteria (3-7 specific, measurable, testable criteria)
+        5. Technical Implementation Notes (Key technical considerations, API endpoints, components to modify/create, libraries to use. Be specific. Refer to Architecture Content.)
+        6. Dependencies and Prerequisites (Other stories or tasks this depends on, or that depend on this)
+        7. Out of Scope (Clearly define what is NOT part of this story)
+        8. Estimated Effort (Optional, e.g., S, M, L or story points if a system is defined - use '{next_story_context_data.get('estimated_effort', 'Medium')}' as a hint)
+        9. Testing Requirements (Key areas to test)
+        10. Risk Assessment and Mitigation (Optional, brief)
+
+        Ensure the story is development-ready, actionable, and aligns with the overall project goals.
+        The story should be self-contained enough for a developer to implement.
+        The final output should be a complete user story in well-formatted markdown.
+        """
+        
         story_task = Task(
-            description=f"""
-            Create a comprehensive, development-ready user story based on this context:
-            
-            PRD Content:
-            {request.prd_content}
-            
-            Architecture Context:
-            {request.architecture_content}
-            
-            Next Story Context:
-            {next_story_context}
-            
-            Current Progress:
-            - Current Epic: {request.current_progress.current_epic}
-            - Completed Stories: {len(request.current_progress.completed_stories)}
-            - Story Type: {request.story_type}
-            - Priority: {request.priority}
-            
-            Create a story following the BMAD story template:
-            1. Story Header (ID, Title, Epic Reference)
-            2. User Story Statement (As a... I want... So that...)
-            3. Story Context and Background
-            4. Detailed Acceptance Criteria
-            5. Technical Implementation Notes
-            6. Dependencies and Prerequisites
-            7. Definition of Done Checklist
-            8. Estimated Effort and Complexity
-            9. Testing Requirements
-            10. Risk Assessment and Mitigation
-            
-            Ensure the story:
-            - Is self-contained and implementable
-            - Includes specific technical guidance from architecture
-            - Has clear, testable acceptance criteria
-            - Follows BMAD story quality standards
-            - Is properly sized for development (not too large/small)
-            - Includes all necessary context for AI agent implementation
-            """,
-            expected_output="Complete user story document in markdown format following BMAD template",
-            agent=pm_agent
+            description=task_description,
+            expected_output="A complete, development-ready user story in markdown format, following the BMAD template.",
+            agent=story_writer_agent
         )
         
-        # Execute story generation
         crew = Crew(
-            agents=[pm_agent],
+            agents=[story_writer_agent],
             tasks=[story_task],
             process=Process.sequential,
-            verbose=False
+            verbose=self.crew_ai_config.verbose_logging
         )
         
-        result = crew.kickoff()
-        story_content = result.raw if hasattr(result, 'raw') else str(result)
+        try:
+            result = crew.kickoff()
+            generated_story_content = result.raw if hasattr(result, 'raw') else str(result)
+        except Exception as e:
+            logger.error(f"CrewAI kickoff failed for story generation: {e}", exc_info=True)
+            raise Exception(f"Story generation by CrewAI failed: {e}")
         
-        # Format the final story
-        formatted_story = self._format_story(
-            story_content,
-            next_story_context,
-            request.current_progress.current_epic
+        # Suggest a filename
+        story_id_placeholder = f"EPIC{next_story_context_data.get('epic_number', 'X')}_STORY{next_story_context_data.get('story_sequence_in_epic', 'Y')}"
+        # Try to extract a title from the generated content for a more descriptive filename
+        title_line = generated_story_content.split('\n', 2)[0] # First line
+        safe_title_suffix = "".join(c if c.isalnum() else '_' for c in title_line.replace("#", "").strip()[:30]).strip('_').lower()
+        if not safe_title_suffix: safe_title_suffix = "next_story"
+        
+        suggested_path = f"stories/{story_id_placeholder}_{safe_title_suffix}.md"
+
+        suggested_metadata = self.create_suggested_metadata(
+            artifact_type="user_story",
+            status="draft", 
+            story_type=args.story_type,
+            priority=args.priority,
+            epic_reference=next_story_context_data.get('epic_title'),
+            story_id_suggestion=story_id_placeholder # The actual ID might be embedded by the agent
         )
         
-        # Generate story ID
-        story_id = f"STORY-{request.current_progress.current_epic:02d}-{len(request.current_progress.completed_stories) + 1:02d}"
+        logger.info(f"User story content generated by tool: {story_id_placeholder}")
         
-        # Save the artifact
-        metadata = self.create_metadata(
-            status="draft",
-            story_id=story_id,
-            epic_number=request.current_progress.current_epic,
-            story_type=request.story_type,
-            priority=request.priority,
-            estimated_effort=next_story_context.get("estimated_effort", "medium")
-        )
-        
-        # Generate filename
-        file_name = f"{story_id.lower().replace('-', '_')}.md"
-        artifact_path = f"stories/{file_name}"
-        
-        await self.state_manager.save_artifact(artifact_path, formatted_story, metadata)
-        
-        logger.info(f"Story saved to: {artifact_path}")
-        
-        return formatted_story
+        return {
+            "content": generated_story_content,
+            "suggested_path": suggested_path,
+            "metadata": suggested_metadata,
+            "message": f"User story content for '{story_id_placeholder}' generated. Please review and save."
+        }
     
     def _analyze_next_story_context(self, prd_content: str, progress: CurrentProgress) -> Optional[Dict[str, Any]]:
-        """Analyze PRD to determine the next story to create."""
+        """
+        Analyze PRD to determine the context for the next story to create.
+        This is a simplified placeholder. A real implementation would involve more sophisticated PRD parsing
+        and understanding of dependencies and story flow.
+        """
+        logger.debug(f"Analyzing PRD for next story. Current epic: {progress.current_epic}, completed stories in epic: {len(progress.completed_stories)}")
         
-        # Simple analysis - in a real implementation this would be more sophisticated
-        prd_lines = prd_content.split('\n')
+        # Placeholder logic: Assumes PRD epics are clearly marked and stories listed under them.
+        # This would ideally parse the PRD to find the current epic and the next uncompleted story.
+        # For now, it just provides a generic context based on the epic number.
         
-        # Find epic sections
-        epic_sections = []
-        current_epic = None
-        current_stories = []
+        # This is a very naive way to find an epic title.
+        epic_title_search = f"Epic {progress.current_epic}"
+        epic_title_found = "Unknown Epic"
+        for line in prd_content.split('\n'):
+            if epic_title_search in line and ("###" in line or "##" in line):
+                epic_title_found = line.replace("###","").replace("##","").replace(epic_title_search, "").strip().split(':',1)[0].strip()
+                break
         
-        for line in prd_lines:
-            line = line.strip()
-            if line.startswith("### Epic") or line.startswith("## Epic"):
-                if current_epic:
-                    epic_sections.append({
-                        "epic": current_epic,
-                        "stories": current_stories
-                    })
-                current_epic = line
-                current_stories = []
-            elif line.startswith("- Story") or line.startswith("* Story"):
-                current_stories.append(line)
+        # This is just a placeholder to simulate finding the "next" story.
+        # A real implementation would need to parse the PRD for actual story titles/descriptions.
+        story_sequence_in_epic = len(progress.completed_stories) + 1
         
-        # Add final epic
-        if current_epic:
-            epic_sections.append({
-                "epic": current_epic,
-                "stories": current_stories
-            })
-        
-        # Find next story to implement
-        if progress.current_epic <= len(epic_sections):
-            current_epic_data = epic_sections[progress.current_epic - 1]
-            completed_count = len(progress.completed_stories)
-            
-            if completed_count < len(current_epic_data["stories"]):
-                # Next story in current epic
-                next_story = current_epic_data["stories"][completed_count]
-                return {
-                    "epic_title": current_epic_data["epic"],
-                    "story_description": next_story,
-                    "epic_number": progress.current_epic,
-                    "story_number": completed_count + 1,
-                    "estimated_effort": "medium",
-                    "context": f"Story {completed_count + 1} of {len(current_epic_data['stories'])} in epic {progress.current_epic}"
-                }
-        
-        return None
-    
-    def _format_story(self, content: str, story_context: Dict[str, Any], epic_number: int) -> str:
-        """Format story with proper structure and metadata."""
-        
-        story_id = f"STORY-{epic_number:02d}-{story_context.get('story_number', 1):02d}"
-        
-        formatted = f"""# {story_id}: {story_context.get('story_description', 'User Story')}
-
-## Status: Draft
-
-## Epic Reference
-- **Epic:** {story_context.get('epic_title', f'Epic {epic_number}')}
-- **Story Position:** {story_context.get('context', 'Story in epic')}
-
-{content}
-
-## Implementation Notes for AI Agents
-
-### Development Approach
-- Follow the technical architecture guidelines
-- Implement with proper error handling and logging
-- Include comprehensive unit tests
-- Document any architectural decisions
-
-### Quality Gates
-- [ ] Code review completed
-- [ ] Unit tests passing (>90% coverage)
-- [ ] Integration tests passing
-- [ ] Acceptance criteria validated
-- [ ] Documentation updated
-
----
-*Generated using BMAD MCP Server - Story Creation Tool*
-"""
-        
-        return formatted
+        return {
+            "epic_title": epic_title_found if epic_title_found != "Unknown Epic" else f"Epic {progress.current_epic}",
+            "story_description_prompt": f"Generate the content for story number {story_sequence_in_epic} of {epic_title_found if epic_title_found != 'Unknown Epic' else f'Epic {progress.current_epic}'}. "
+                                        f"Consider it's a new feature unless specified otherwise by story_type argument. "
+                                        f"Ensure it logically follows previously completed stories (if any) for this epic: {', '.join(progress.completed_stories)}.",
+            "epic_number": progress.current_epic,
+            "story_sequence_in_epic": story_sequence_in_epic,
+            "estimated_effort": "Medium", # Default placeholder
+        }

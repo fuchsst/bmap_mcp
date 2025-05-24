@@ -29,14 +29,16 @@ The envisioned interaction flow proceeds as follows:
 1.  The developer interacts with the coding assistant within the IDE, expressing an intent or a command.
 2.  The assistant consults the project-specific `instruction.md` file to understand the current project context, active BMAD phase, and relevant guidelines.
 3.  Guided by this information, the assistant formulates and executes one or more MCP calls to the BMAD-MCP server.
-4.  The BMAD-MCP server (Python/CrewAI) receives these calls, invokes the appropriate BMAD tools (which in turn trigger CrewAI agents/tasks, e.g., to draft a Product Requirement Document section, update a user story's status, or store a technical decision). The server manages the state and physical storage of the associated artifacts in the `.bmad` directory as Markdown/JSON files.
-5.  The server returns a response (e.g., success status, URI of a newly created artifact, error message) to the assistant.
-6.  The assistant processes this response and presents the results to the developer, potentially prompting for further input or the next action.
+4.  The BMAD-MCP server (Python/CrewAI) receives these calls and invokes the appropriate BMAD tools. These tools, potentially using CrewAI agents, generate artifact content, metadata, and suggest a file path. The server itself **does not write to the file system**.
+5.  The server returns a structured response to the assistant, containing the generated artifact content, suggested path (e.g., within the `.bmad` directory), and any relevant metadata (e.g., artifact type, status).
+6.  The assistant processes this response and presents the generated artifact content and suggested path to the developer.
+7.  The developer reviews the artifact within the IDE. They can edit it, approve it, and then use the IDE's capabilities or instruct the assistant to save the file to the suggested path or an alternative location. The actual file writing is handled by the assistant/IDE, not the BMAD-MCP server.
 
 The value proposition of this integrated system is multi-faceted:
 
-  * **Standardization and Consistency:** By embedding BMAD logic (via CrewAI agents) into the MCP server and guiding the assistant via `instruction.md`, the workflow enforces adherence to the methodology.
-  * **Enhanced Efficiency:** Automation of artifact creation, state management, and other routine BMAD tasks can significantly reduce manual effort.
+  * **User Control & Transparency:** Developers review and approve all artifact creation and modifications before they are saved to disk, providing greater control and visibility.
+  * **Standardization and Consistency:** By embedding BMAD logic (via CrewAI agents) into the MCP server for content generation and guiding the assistant via `instruction.md`, the workflow enforces adherence to the methodology for artifact structure and content.
+  * **Enhanced Efficiency:** Automation of artifact content generation and structured suggestions by BMAD tools significantly reduces manual effort.
   * **Leveraging AI Capabilities:** The LLM capabilities of coding assistants and the agentic task execution of CrewAI are harnessed.
   * **Reduced Cognitive Load:** Developers can focus on higher-level problem-solving.
   * **Explicit Guidance:** Directly addresses BMAD's core tenets. 
@@ -45,7 +47,7 @@ This framework aims to create a more intelligent, responsive, and streamlined de
 
 ## II. The Custom BMAD-MCP Server: Architecture and Design (Python/CrewAI Focus)
 
-The BMAD-MCP server is the cornerstone of the proposed workflow, translating the BMAD methodology into a set of remotely callable, AI-consumable services. Its design and implementation using Python, CrewAI, and FastMCP (or a similar Python MCP library) are critical. State will be managed via Markdown and JSON files within a `.bmad` directory in the project.
+The BMAD-MCP server is the cornerstone of the proposed workflow, translating the BMAD methodology into a set of remotely callable, AI-consumable services. Its design and implementation using Python, CrewAI, and FastMCP (or a similar Python MCP library) are critical. The server will primarily *read* existing project state (artifacts in Markdown and JSON files within a `.bmad` directory) to provide context for its tools, but it will **not directly write or modify these files**. Instead, it returns generated content and suggestions to the AI assistant.
 
 ### A. Translating BMAD Methodology into MCP Server Capabilities
 
@@ -54,44 +56,59 @@ The BMAD methodology's components, processes, and artifacts  will be mapped to M
 **Mapping BMAD Tools and Roles to MCP Tools (backed by CrewAI Agents):**
 BMAD concepts like "Configurable Agents" (e.g., Scrum Master, Developer personas)  will be realized as CrewAI agents. Each CrewAI agent will have specific goals, backstories, and tools (which could be Python functions for file I/O, data manipulation, or even calling other services). The MCP tools exposed by the server will act as entry points to trigger these CrewAI agents or their specific tasks. BMAD "Tasks"  can be directly mapped to CrewAI tasks assigned to the appropriate agent.
 
-**Artifact Management (Markdown/JSON in `.bmad`):**
-The BMAD-MCP server will manage artifacts within a `.bmad` directory in the project root.
+**Artifact Management (Markdown/JSON in `.bmad` - Read-Only by Server):**
+The BMAD-MCP server's tools will *read* existing artifacts from the `.bmad` directory to gain context for generating new content or performing analysis. The actual creation, modification, and deletion of these files will be handled by the AI assistant/IDE, based on user approval of the content returned by the server's tools.
 
-  * **Structure:**
+  * **Structure (as read by server, created/managed by assistant/IDE):**
       * `.bmad/project_meta.json`: Stores project-level metadata, current BMAD phase, active roles.
-      * `.bmad/prd/`: Contains PRD documents (e.g., `main_prd.md` with sections, or `prd_config.json` and individual section files).
-      * `.bmad/stories/`: Contains user stories (e.g., `story_001.md`, `story_002.md`).
-      * `.bmad/decisions/`: Contains technical decision logs (e.g., `tech_decision_001.md`).
-      * `.bmad/ideation/`: Contains ideation notes (e.g., `ideas_log.md`).
-  * **State:** The state of each artifact (e.g., "draft," "review," "approved") will be stored within the artifact file itself (e.g., as YAML frontmatter in Markdown files, or as a field in JSON files).
-  * **MCP Tools for Artifacts:** MCP tools will create, read, update, and delete these files, and manage their state by modifying the file content. For example, an MCP tool `approve_user_story(story_uri: str)` would update the status in the corresponding `story_XXX.md` file.
+      * `.bmad/prd/`: Contains PRD documents.
+      * `.bmad/stories/`: Contains user stories.
+      * `.bmad/decisions/`: Contains technical decision logs.
+      * `.bmad/ideation/`: Contains ideation notes.
+  * **State (as read by server, managed by assistant/IDE):** The state of each artifact (e.g., "draft," "review," "approved") is stored within the artifact file itself (e.g., as YAML frontmatter in Markdown files, or as a field in JSON files). The server tools may suggest state changes as part of their output metadata.
+  * **MCP Tools for Artifacts (Content Generation & Suggestion):**
+      * **Content Generation:** MCP tools will generate the *content* for new artifacts or suggest modifications to existing ones.
+      * **Path Suggestion:** Tools will suggest a file path (e.g., `.bmad/prd/new_feature_prd.md`) where the new artifact could be saved.
+      * **Metadata Suggestion:** Tools will return relevant metadata (e.g., artifact type, proposed status like "draft").
+      * **No Direct File I/O for Writing:** The server tools will **not** directly create, write to, or delete files in the `.bmad` directory. They provide the content and suggestions to the assistant.
+      * **Reading for Context:** Tools *will* read existing files from `.bmad` (via a `StateManager` focused on read operations) to inform their generation process (e.g., a `generate_user_stories` tool would read the PRD content).
+      * **Example:** A `create_prd_draft` tool would take a topic, use a CrewAI agent to generate the PRD content, and then return an object like:
+        ```json
+        {
+          "artifact_type": "prd",
+          "content": "# PRD for Project X...",
+          "suggested_path": ".bmad/prd/project_x_prd.md",
+          "metadata": {"status": "draft", "title": "Project X PRD"}
+        }
+        ```
+        The AI assistant would then show this to the user, who could then decide to save it (perhaps after editing) using the IDE's file capabilities.
 
-**Table 1: BMAD Roles and Artifacts to MCP Tool Mapping (Python/CrewAI & File-Based State)**
+**Table 1: BMAD Roles and Artifacts to MCP Tool Mapping (Python/CrewAI & File-Based State - Server Read-Only)**
 
-| BMAD Role (Conceptual) / CrewAI Agent | Associated BMAD Artifact / File(s) in `.bmad` | Corresponding MCP Tool (Python function via FastMCP) | Input Parameters (Illustrative JSON Schema) | Output/Return Value (Illustrative) | State Management Aspect (File Operations in `.bmad`) |
+| BMAD Role (Conceptual) / CrewAI Agent | BMAD Artifact Read by Tool (from `.bmad`) | Corresponding MCP Tool (Python function via FastMCP) | Input Parameters (Illustrative JSON Schema) | Output/Return Value (Illustrative - Content & Suggestions) | User/Assistant Action (Post-Tool Execution) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| System / Orchestrator | `.bmad/project_meta.json` | `initialize_bmad_project(project_name: str, initial_guidance_uri?: str)` | `{"project_name": "string", "initial_guidance_uri": "string"}` | `{"project_root_bmad": "string", "status": "initialized"}` | Creates `.bmad` dir, `project_meta.json`. |
-| System / Orchestrator | `.bmad/project_meta.json` | `set_project_phase(phase: str)` | `{"phase": "string"}` | `{"status": "phase_updated"}` | Updates `current_phase` in `project_meta.json`. |
-| Scrum Master CrewAI Agent | `.bmad/prd/main_prd.md` or `.bmad/prd/prd_config.json` & section files | `create_prd_draft(title: str, overview_prompt: str)` | `{"title": "string", "overview_prompt": "string"}` | `{"prd_uri": "string", "status": "draft"}` | Creates PRD file(s) with 'draft' status. Content generated by SM CrewAI agent. |
-| Scrum Master CrewAI Agent | `.bmad/prd/main_prd.md` (appends section) | `add_prd_section(prd_uri: str, section_title: str, content_prompt: str)` | `{"prd_uri": "string", "section_title": "string", "content_prompt": "string"}` | `{"section_uri": "string", "status": "updated"}` | Appends section to PRD file. Content by SM CrewAI agent. Updates PRD status/timestamp. |
-| Scrum Master CrewAI Agent | `.bmad/stories/story_XXX.md` | `generate_user_stories(prd_section_uri: str, count_hint?: int)` | `{"prd_section_uri": "string", "count_hint": "integer"}` | `{"stories_collection_uri": "string"}` | Creates user story Markdown files with 'draft' status, linked to PRD section. Content by SM CrewAI agent. |
-| Developer CrewAI Agent / SM CrewAI Agent | `.bmad/stories/story_XXX.md` | `update_user_story_status(story_uri: str, new_status: str)` | `{"story_uri": "string", "new_status": "string"}` | `{"story_uri": "string", "status": "string"}` | Updates 'status' in frontmatter of the specified story Markdown file. |
-| Developer CrewAI Agent | `.bmad/decisions/decision_YYY.md` | `document_technical_decision(title: str, context_prompt: str, options_prompt: str)` | `{"title": "string", "context_prompt": "string", "options_prompt": "string"}` | `{"decision_uri": "string", "status": "draft"}` | Creates technical decision Markdown file with 'draft' status. Content by Dev CrewAI agent. |
-| System / Any Agent | Any artifact file | `get_artifact_content(artifact_uri: str)` | `{"artifact_uri": "string"}` | `{"content": "string"}` | Reads and returns content of the specified artifact file. |
-| System / Any Agent | `.bmad/` directory | `list_bmad_artifacts(artifact_type: str, status_filter?: str)` | `{"artifact_type": "string", "status_filter": "string"}` | `{"artifacts": [{"uri": "string", "status": "string"}]}` | Scans `.bmad` for files of `artifact_type`, filters by status in frontmatter/JSON. |
-| Ideation CrewAI Agent (or general purpose) | `.bmad/ideation/ideas_log.md` | `capture_ideation_input(idea_text: str, source?: str)` | `{"idea_text": "string", "source": "string"}` | `{"log_uri": "string", "status": "appended"}` | Appends `idea_text` to `ideas_log.md`. |
+| System / Orchestrator | *(None for initialization)* | `propose_bmad_project_initialization(project_name: str, initial_guidance_uri?: str)` | `{"project_name": "string", "initial_guidance_uri": "string"}` | `{"suggested_bmad_dir": ".bmad", "project_meta_content": "{...}", "suggested_meta_path": ".bmad/project_meta.json", "status": "proposal"}` | User/Assistant creates `.bmad` dir and `project_meta.json` with provided content. |
+| System / Orchestrator | `.bmad/project_meta.json` (to read current phase) | `propose_project_phase_update(new_phase: str)` | `{"new_phase": "string"}` | `{"suggested_update_to_meta": {"current_phase": "new_phase"}, "status": "proposal"}` | User/Assistant updates `current_phase` in `project_meta.json`. |
+| Scrum Master CrewAI Agent | *(Reads project brief if provided as input)* | `generate_prd_draft_content(title: str, overview_prompt: str, project_brief_content?: str)` | `{"title": "string", "overview_prompt": "string", "project_brief_content": "string"}` | `{"artifact_type": "prd", "content": "...", "suggested_path": ".bmad/prd/...", "metadata": {"status": "draft"}}` | User/Assistant reviews, edits, and saves the PRD content to the suggested path. |
+| Scrum Master CrewAI Agent | `.bmad/prd/main_prd.md` (reads existing PRD) | `generate_prd_section_content(existing_prd_content: str, section_title: str, content_prompt: str)` | `{"existing_prd_content": "string", ...}` | `{"artifact_type": "prd_section", "content_to_append": "...", "suggested_target_path": ".bmad/prd/main_prd.md", "metadata": {}}` | User/Assistant reviews, edits, and appends the section to the PRD file. |
+| Scrum Master CrewAI Agent | `.bmad/prd/...` (reads PRD section) | `generate_user_stories_content(prd_section_content: str, count_hint?: int)` | `{"prd_section_content": "string", ...}` | `{"artifact_type": "user_story_collection", "stories": [{"content": "...", "suggested_path": ".bmad/stories/story_001.md", "metadata":{}}, ... ]}` | User/Assistant reviews each story, edits, and saves them individually. |
+| Developer CrewAI Agent / SM CrewAI Agent | `.bmad/stories/story_XXX.md` (reads story) | `propose_user_story_status_update(story_content: str, current_path: str, new_status: str)` | `{"story_content": "string", "current_path": "string", "new_status": "string"}` | `{"suggested_updated_content": "...", "target_path": "string", "metadata_change": {"status": "new_status"}}` | User/Assistant reviews, edits (if needed), and updates the status in the story file. |
+| Developer CrewAI Agent | *(Reads relevant context if provided)* | `generate_technical_decision_content(title: str, context_prompt: str, options_prompt: str)` | `{...}` | `{"artifact_type": "technical_decision", "content": "...", "suggested_path": ".bmad/decisions/...", "metadata": {"status": "draft"}}` | User/Assistant reviews, edits, and saves the decision document. |
+| System / Any Agent | *(Reads artifact from path provided by assistant)* | `get_artifact_content_for_assistant(artifact_path: str)` | `{"artifact_path": "string"}` | `{"content": "string", "metadata": "{...}"}` | (Server provides content to assistant for its own use or to pass to another tool). |
+| System / Any Agent | *(Reads files from .bmad/ based on assistant's request)* | `list_bmad_artifacts_for_assistant(artifact_type?: str, status_filter?: str)` | `{...}` | `{"artifacts": [{"path": "string", "status": "string", "type": "string"}]}` | (Server provides list to assistant). |
+| Ideation CrewAI Agent | *(None for initial capture, or reads existing log)* | `generate_ideation_log_entry(idea_text: str, source?: str, existing_log_content?: str)` | `{...}` | `{"artifact_type": "ideation_log_entry", "content_to_append": "...", "suggested_target_path": ".bmad/ideation/ideas_log.md"}` | User/Assistant reviews and appends to the log file. |
 
 ### B. MCP Server Implementation Considerations (Python/CrewAI)
 
   * **Technology Stack:** Python will be the primary language.
-      * **FastMCP:** This framework simplifies MCP server development in Python, allowing developers to expose Python functions (which can internally trigger CrewAI agent tasks) as MCP tools with minimal boilerplate.  It handles MCP protocol details, schema generation from type hints, and input validation.
-      * **CrewAI:** Used to define the BMAD agents (Scrum Master, Developer, etc.), their specific tasks, and the overall process flow for complex operations like "generate PRD section." CrewAI agents can use standard Python tools for file I/O to interact with the `.bmad` directory.
-  * **Designing MCP Tools:** Best practices include atomic operations, clear descriptions for LLM understanding, robust input validation (FastMCP can help with type annotations), and meaningful error handling. 
-  * **State Management (File-Based):**
-      * All state is stored in Markdown (with YAML frontmatter) or JSON files within the `.bmad` project subdirectory.
-      * CrewAI agents will be given tools (Python functions) to read, write, and update these files.
-      * File locking or other concurrency controls might be needed if multiple asynchronous CrewAI tasks could potentially write to the same file, though initial designs might assume sequential processing per user request.
-      * The structure of these files (schemas for JSON, frontmatter fields for Markdown) must be well-defined.
+      * **FastMCP:** This framework simplifies MCP server development in Python.
+      * **CrewAI:** Used to define the BMAD agents and their tasks for content generation. CrewAI agents will use a `StateManager` (modified for read-only operations concerning the server's direct actions) to fetch context from existing `.bmad` files.
+  * **Designing MCP Tools:** Tools will return structured data (e.g., a Pydantic model or dictionary) containing the generated content, a suggested file path, and relevant metadata. They will not perform file write operations.
+  * **State Management (File-Based, Read-Only by Server):**
+      * The BMAD-MCP server tools will *read* state from Markdown/JSON files in `.bmad` using a `StateManager`.
+      * The `StateManager` will be adapted to primarily support read operations for the server tools. Any write-related methods in `StateManager` would be for internal server use if absolutely necessary (e.g., caching, internal logging) but not for creating or modifying BMAD artifacts directly.
+      * CrewAI agents, when run by a server tool, will be provided with necessary context read from files by the `StateManager`.
+      * The actual writing of artifacts to the `.bmad` directory, and thus the persistence of state, becomes the responsibility of the AI assistant/IDE, guided by the user.
 
 ### C. Configuration of the BMAD-MCP Server
 

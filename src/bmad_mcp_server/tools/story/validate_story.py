@@ -1,14 +1,18 @@
 """
 Story validation tool using BMAD methodology.
+Returns the validation report content to the assistant.
 """
 
-from typing import Any, Dict, List
+import json
+from typing import Any, Dict, List, Literal
+from datetime import datetime
 from pydantic import BaseModel, Field
 import logging
 
 from ..base import BMadTool
 from ...checklists.loader import load_checklist, execute_checklist, ChecklistExecutionResult
 from ...utils.state_manager import StateManager
+from ...crewai_integration.config import CrewAIConfig
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +21,7 @@ class StoryValidationRequest(BaseModel):
     """Request model for story validation."""
     story_content: str = Field(..., description="Story content to validate")
     checklist_types: List[str] = Field(
-        default=["story_draft_checklist"],
+        default_factory=lambda: ["story_draft_checklist"], # Default to draft checklist
         description="List of checklists to run against the story"
     )
     validation_mode: str = Field(
@@ -28,7 +32,7 @@ class StoryValidationRequest(BaseModel):
         default="draft",
         description="Current phase of the story"
     )
-
+    # No Config.json_schema_extra needed if enums are handled by FastMCP or tool logic
 
 class ValidateStoryTool(BMadTool):
     """
@@ -36,19 +40,23 @@ class ValidateStoryTool(BMadTool):
     
     This tool runs comprehensive validation on user stories to ensure they meet
     BMAD quality standards and are ready for development implementation.
+    It returns the report content.
     """
     
-    def __init__(self, state_manager: StateManager):
-        super().__init__(state_manager)
+    def __init__(self, state_manager: StateManager, crew_ai_config: CrewAIConfig):
+        super().__init__(state_manager, crew_ai_config)
         self.category = "story"
-        self.description = "Validate user stories against Definition of Done checklists"
+        self.description = "Validate user stories against BMAD checklists. Does not write files."
     
     def get_input_schema(self) -> Dict[str, Any]:
         """Get input schema for story validation using Pydantic model."""
         schema = StoryValidationRequest.model_json_schema()
-        # Add enum constraints
+        # Explicitly define enums for clarity
         schema["properties"]["validation_mode"]["enum"] = ["strict", "standard", "lenient"]
         schema["properties"]["story_phase"]["enum"] = ["draft", "review", "ready", "in_progress", "done"]
+        # Ensure items for checklist_types also has enum if it's a list of literals server-side
+        if "items" not in schema["properties"]["checklist_types"]: # Should be there from Pydantic List[str]
+             schema["properties"]["checklist_types"]["items"] = {} # Add if missing, though unlikely
         schema["properties"]["checklist_types"]["items"]["enum"] = [
             "story_draft_checklist", 
             "story_dod_checklist", 
@@ -56,204 +64,174 @@ class ValidateStoryTool(BMadTool):
         ]
         return schema
     
-    async def execute(self, arguments: Dict[str, Any]) -> str:
-        """Execute story validation."""
-        # Validate input using Pydantic
-        request = StoryValidationRequest(**arguments)
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute story validation and return report content and suggestions."""
+        try:
+            args = StoryValidationRequest(**arguments)
+        except Exception as e:
+            logger.error(f"Input validation failed for ValidateStoryTool: {e}", exc_info=True)
+            raise ValueError(f"Invalid arguments for ValidateStoryTool: {e}")
+
+        logger.info(f"Validating story content using checklists: {', '.join(args.checklist_types)}")
         
-        logger.info(f"Validating story using {len(request.checklist_types)} checklists")
+        validation_reports_content = []
+        all_results_summary = [] # To store ChecklistExecutionResult objects or key stats
         
-        validation_results = []
-        overall_pass_rate = 0
-        total_items = 0
-        total_passed = 0
-        
-        # Run each checklist
-        for checklist_type in request.checklist_types:
+        for checklist_name_input in args.checklist_types:
             try:
-                # Load and execute checklist
-                checklist = load_checklist(checklist_type)
+                checklist_data = load_checklist(checklist_name_input)
                 
-                validation_result = execute_checklist(
-                    checklist=checklist,
-                    document_content=request.story_content,
-                    context={
-                        "document_type": "story",
-                        "story_phase": request.story_phase,
-                        "validation_type": "story_quality"
-                    },
-                    mode=request.validation_mode
+                validation_result_data = execute_checklist(
+                    checklist=checklist_data,
+                    document_content=args.story_content,
+                    context={"document_type": "story", "story_phase": args.story_phase},
+                    mode=args.validation_mode
                 )
+                all_results_summary.append(validation_result_data) # Store full result object
                 
-                validation_results.append({
-                    "checklist_type": checklist_type,
-                    "result": validation_result
-                })
-                
-                total_items += validation_result.total_items
-                total_passed += validation_result.passed_items
-                
+                # Format individual checklist report section
+                report_section = self._format_individual_checklist_report(
+                    checklist_name=checklist_name_input,
+                    validation_result=validation_result_data
+                )
+                validation_reports_content.append(report_section)
+                    
             except FileNotFoundError:
-                logger.warning(f"Checklist not found: {checklist_type}, skipping")
-                continue
+                error_msg = f"Checklist '{checklist_name_input}' not found."
+                logger.warning(error_msg)
+                validation_reports_content.append(f"## Checklist: {checklist_name_input}\nError: {error_msg}\n")
             except Exception as e:
-                logger.error(f"Error running checklist {checklist_type}: {e}")
-                continue
-        
-        if not validation_results:
-            return "No valid checklists could be executed. Please check checklist names."
-        
-        # Calculate overall pass rate
-        overall_pass_rate = (total_passed / total_items * 100) if total_items > 0 else 0
-        
-        # Format comprehensive validation report
-        report = self._format_story_validation_report(
-            validation_results=validation_results,
-            overall_pass_rate=overall_pass_rate,
-            story_phase=request.story_phase,
-            document_length=len(request.story_content)
+                error_msg = f"Error validating story with {checklist_name_input}: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                validation_reports_content.append(f"## Checklist: {checklist_name_input}\nError: {error_msg}\n")
+
+        if not all_results_summary: # If no checklists were run successfully
+            return {
+                "content": "No valid checklists could be executed. Please check checklist names.",
+                "suggested_path": None,
+                "metadata": self.create_suggested_metadata(artifact_type="story_validation_report", status="error_no_checklists"),
+                "message": "Story validation failed: No checklists could be run."
+            }
+
+        # Create a consolidated report
+        full_report_content = self._create_consolidated_report(
+            args=args,
+            all_results_summary=all_results_summary,
+            individual_reports_content="\n\n---\n\n".join(validation_reports_content)
         )
         
-        # Save validation report
-        metadata = self.create_metadata(
+        # Determine a suggested path
+        story_title_line = args.story_content.split('\n', 1)[0] # Get first line for a hint
+        safe_title = "".join(c if c.isalnum() else '_' for c in story_title_line[:30]).strip('_').lower()
+        if not safe_title: safe_title = "story"
+        
+        suggested_path = f"checklists/stories/validation_{safe_title}_{args.story_phase}.md"
+
+        # Calculate overall pass rate for metadata
+        total_items_overall = sum(res.total_items for res in all_results_summary)
+        total_passed_overall = sum(res.passed_items for res in all_results_summary)
+        overall_pass_rate_value = (total_passed_overall / total_items_overall * 100) if total_items_overall > 0 else 0
+
+        suggested_metadata = self.create_suggested_metadata(
+            artifact_type="story_validation_report",
             status="completed",
-            story_phase=request.story_phase,
-            validation_mode=request.validation_mode,
-            overall_pass_rate=round(overall_pass_rate, 1),
-            checklists_run=len(validation_results)
+            checklists_used=args.checklist_types,
+            validation_mode=args.validation_mode,
+            story_phase=args.story_phase,
+            overall_pass_rate=round(overall_pass_rate_value, 1)
         )
         
-        # Generate filename
-        story_title_sanitized = "".join(c if c.isalnum() or c in (' ', '_') else '_' for c in request.story_content[:30])
-        story_title_sanitized = story_title_sanitized.replace(' ', '_').lower()
-        if not story_title_sanitized: # Handle empty or fully sanitized title
-            story_title_sanitized = "unnamed_story"
-            
-        file_name = f"story_validation_{request.story_phase}_{story_title_sanitized}.md"
-        artifact_path = f"checklists/{file_name}"
+        logger.info(f"Story validation report content generated for checklists: {', '.join(args.checklist_types)}")
         
-        await self.state_manager.save_artifact(artifact_path, report, metadata)
-        
-        logger.info(f"Story validation report saved to: {artifact_path}")
-        
-        return report
-    
-    def _format_story_validation_report(
+        return {
+            "content": full_report_content,
+            "suggested_path": suggested_path,
+            "metadata": suggested_metadata,
+            "message": f"Story validation report generated using {len(args.checklist_types)} checklist(s). Please review and save."
+        }
+
+    def _format_individual_checklist_report(
         self, 
-        validation_results: List[Dict[str, Any]], 
-        overall_pass_rate: float,
-        story_phase: str,
-        document_length: int
+        checklist_name: str, 
+        validation_result: ChecklistExecutionResult
     ) -> str:
-        """Format comprehensive story validation report."""
+        """Formats a report section for a single checklist execution."""
+        total_items = validation_result.total_items
+        passed_items = validation_result.passed_items
+        failed_items = validation_result.failed_items
+        na_items = validation_result.na_items
+        pass_rate = (passed_items / total_items * 100) if total_items > 0 else 0
         
-        report = f"""# BMAD Story Validation Report
+        status_emoji = "🟢" if pass_rate >= 85 else "🟡" if pass_rate >= 70 else "🔴"
 
-## Story Quality Assessment
+        report_section = f"## Checklist: {checklist_name.replace('_', ' ').title()} {status_emoji}\n"
+        report_section += f"- **Pass Rate:** {pass_rate:.1f}% ({passed_items}/{total_items})\n"
+        report_section += f"- Items Passed: {passed_items}, Failed: {failed_items}, N/A: {na_items}\n"
 
-### Overall Validation Summary
-- **Story Phase:** {story_phase.title()}
-- **Document Length:** {document_length:,} characters
-- **Checklists Executed:** {len(validation_results)}
-- **Overall Quality Score:** {overall_pass_rate:.1f}%
-
-### Story Readiness Status
-"""
-        
-        # Determine readiness based on phase and pass rate
-        if story_phase == "draft":
-            if overall_pass_rate >= 80:
-                report += "🟢 **READY FOR REVIEW** - Story meets draft quality standards"
-                readiness = "ready_for_review"
-            elif overall_pass_rate >= 60:
-                report += "🟡 **NEEDS MINOR IMPROVEMENTS** - Address key issues before review"
-                readiness = "needs_improvements"
-            else:
-                report += "🔴 **NOT READY** - Significant improvements needed"
-                readiness = "not_ready"
-        elif story_phase == "review":
-            if overall_pass_rate >= 90:
-                report += "🟢 **READY FOR DEVELOPMENT** - Story meets all quality standards"
-                readiness = "ready_for_development"
-            elif overall_pass_rate >= 75:
-                report += "🟡 **MOSTLY READY** - Minor refinements recommended"
-                readiness = "mostly_ready"
-            else:
-                report += "🔴 **NEEDS REVISION** - Return to draft for improvements"
-                readiness = "needs_revision"
-        else:
-            if overall_pass_rate >= 85:
-                report += "🟢 **QUALITY STANDARDS MET** - Story is well-defined"
-                readiness = "quality_met"
-            else:
-                report += "🟡 **QUALITY CONCERNS** - Consider improvements"
-                readiness = "quality_concerns"
-        
-        # Add detailed results for each checklist
-        report += "\n\n### Checklist Results\n"
-        
-        for validation_data in validation_results:
-            checklist_type = validation_data["checklist_type"]
-            result = validation_data["result"]
-            
-            checklist_pass_rate = (result.passed_items / result.total_items * 100) if result.total_items > 0 else 0
-            status_icon = "✅" if checklist_pass_rate >= 80 else "⚠️" if checklist_pass_rate >= 60 else "❌"
-            
-            report += f"\n#### {checklist_type.replace('_', ' ').title()} {status_icon}\n"
-            report += f"- **Score:** {checklist_pass_rate:.1f}% ({result.passed_items}/{result.total_items})\n"
-            report += f"- **Failed Items:** {result.failed_items}\n"
-            report += f"- **Not Applicable:** {result.na_items}\n"
-            
-            # Add section breakdown
-            if result.section_results:
-                report += "- **Section Breakdown:**\n"
-                for section in result.section_results:
-                    section_rate = (section.passed / section.total * 100) if section.total > 0 else 0
-                    section_icon = "✅" if section_rate >= 80 else "⚠️" if section_rate >= 60 else "❌"
-                    report += f"  - {section.title}: {section.passed}/{section.total} ({section_rate:.0f}%) {section_icon}\n"
-        
-        # Add critical issues across all checklists
-        all_failed_items = []
-        for validation_data in validation_results:
-            all_failed_items.extend(validation_data["result"].failed_items_details)
-        
-        if all_failed_items:
-            report += "\n\n### Critical Issues to Address\n"
-            for i, item in enumerate(all_failed_items, 1):
-                report += f"{i}. **{item['category']}:** {item['description']}\n"
+        if validation_result.failed_items_details:
+            report_section += "\n**Failed Items:**\n"
+            for item in validation_result.failed_items_details:
+                report_section += f"  - **{item['category']}:** {item['description']}"
                 if item.get('recommendation'):
-                    report += f"   *Action:* {item['recommendation']}\n"
+                    report_section += f" (Recommendation: {item['recommendation']})\n"
+                else:
+                    report_section += "\n"
         
-        # Add recommendations based on readiness
-        report += f"\n\n### Next Steps\n"
-        if readiness == "ready_for_development":
-            report += "- ✅ Story is ready for development implementation\n"
-            report += "- Assign to development team\n"
-            report += "- Set up development environment and dependencies\n"
-        elif readiness == "ready_for_review":
-            report += "- 🔄 Move story to review phase\n"
-            report += "- Schedule stakeholder review\n"
-            report += "- Address any remaining minor issues\n"
-        elif readiness in ["needs_improvements", "mostly_ready"]:
-            report += "- 🔧 Address identified issues\n"
-            report += "- Re-validate after improvements\n"
-            report += "- Focus on failed checklist items\n"
-        else:
-            report += "- ❌ Significant revision required\n"
-            report += "- Return to story creation/refinement\n"
-            report += "- Address all critical quality issues\n"
+        if validation_result.recommendations:
+            report_section += "\n**Overall Recommendations for this Checklist:**\n"
+            for rec in validation_result.recommendations:
+                report_section += f"- {rec}\n"
+        return report_section.strip()
+
+    def _create_consolidated_report(
+        self,
+        args: StoryValidationRequest,
+        all_results_summary: List[ChecklistExecutionResult],
+        individual_reports_content: str
+    ) -> str:
+        """Creates the final consolidated report string."""
+        total_items_overall = sum(res.total_items for res in all_results_summary)
+        total_passed_overall = sum(res.passed_items for res in all_results_summary)
+        overall_pass_rate = (total_passed_overall / total_items_overall * 100) if total_items_overall > 0 else 0
+
+        report = f"# BMAD Story Validation Report\n\n"
+        report += f"## Overall Summary\n"
+        report += f"- **Story Phase:** {args.story_phase.title()}\n"
+        report += f"- **Document Length:** {len(args.story_content):,} characters\n"
+        report += f"- **Checklists Executed:** {len(args.checklist_types)}\n"
+        report += f"- **Overall Quality Score:** {overall_pass_rate:.1f}%\n"
+
+        report += "\n### Story Readiness Status\n"
+        readiness_message = "Status Undetermined"
+        if args.story_phase == "draft":
+            if overall_pass_rate >= 80: readiness_message = "🟢 READY FOR REVIEW - Story meets draft quality standards."
+            elif overall_pass_rate >= 60: readiness_message = "🟡 NEEDS MINOR IMPROVEMENTS - Address key issues before review."
+            else: readiness_message = "🔴 NOT READY - Significant improvements needed."
+        elif args.story_phase == "review":
+            if overall_pass_rate >= 90: readiness_message = "🟢 READY FOR DEVELOPMENT - Story meets all quality standards."
+            elif overall_pass_rate >= 75: readiness_message = "🟡 MOSTLY READY - Minor refinements recommended."
+            else: readiness_message = "🔴 NEEDS REVISION - Return to draft for improvements."
+        else: # e.g. "ready", "in_progress", "done"
+            if overall_pass_rate >= 85: readiness_message = "🟢 QUALITY STANDARDS MET - Story is well-defined for its phase."
+            else: readiness_message = "🟡 QUALITY CONCERNS - Consider improvements based on phase."
+        report += f"{readiness_message}\n"
         
-        # Add story-specific guidance
-        report += f"\n\n### Story Development Guidance\n"
-        if "acceptance criteria" in " ".join([item['description'].lower() for item in all_failed_items]):
-            report += "- **Focus:** Improve acceptance criteria clarity and testability\n"
-        if "technical" in " ".join([item['description'].lower() for item in all_failed_items]):
-            report += "- **Focus:** Add more detailed technical implementation guidance\n"
-        if "dependency" in " ".join([item['description'].lower() for item in all_failed_items]):
-            report += "- **Focus:** Clarify dependencies and prerequisites\n"
+        report += "\n---\n"
+        report += individual_reports_content
         
-        report += "- **Remember:** Stories should be self-contained and implementable by AI agents\n"
-        report += "- **Quality:** Ensure all acceptance criteria are specific and testable\n"
+        # Add combined critical issues if any
+        all_failed_items_details_combined = []
+        for res_summary in all_results_summary:
+            all_failed_items_details_combined.extend(res_summary.failed_items_details)
         
-        report += "\n---\n*Generated using BMAD MCP Server - Story Validation Tool*"
-        return report
+        if all_failed_items_details_combined:
+            report += "\n\n---\n## Combined Critical Issues to Address (All Checklists)\n"
+            unique_failed_items = {json.dumps(item, sort_keys=True): item for item in all_failed_items_details_combined}.values() # Crude deduplication
+            for i, item_dict in enumerate(unique_failed_items, 1):
+                report += f"{i}. **{item_dict.get('category', 'N/A')}:** {item_dict.get('description', 'N/A')}\n"
+                if item_dict.get('recommendation'):
+                    report += f"   *Action:* {item_dict.get('recommendation')}\n"
+
+        report += "\n\n---\n" # Footer for the whole report
+        report += "End of BMAD Story Validation Report."
+        return report.strip()

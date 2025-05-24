@@ -1,0 +1,76 @@
+site_name: BMAD MCP Server
+site_url: https://fuchsst.github.io/bmap_mcp/ # Replace with actual URL if hosted
+repo_url: https://github.com/fuchsst/bmap_mcp
+repo_name: fuchsst/bmap_mcp
+edit_uri: "" # Or 'edit/main/docs/' if you want direct edit links
+
+theme:
+  name: material
+  palette:
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.annotate
+    - content.code.copy
+#  logo: assets/logo.png # Optional: if you have a logo
+
+nav:
+  - 'Home': 'index.md'
+  - 'Getting Started': 'getting-started.md'
+  - 'Configuration': 'configuration.md'
+  - 'IDE Integration': 'ide-integration.md'
+  - 'Development Workflow': 'development-workflow.md'
+  - 'Tool Catalog': 'tool_catalog.md'
+  - 'Docker Deployment': 'docker-deployment.md'
+  - 'Troubleshooting': 'troubleshooting.md'
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - admonition
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search
+  # - minify: # Optional: to minify HTML, JS, CSS
+  #     minify_html: true
+  #     minify_js: true
+  #     minify_css: true
+
+# Optional: Custom CSS or JavaScript
+# extra_css:
+#   - stylesheets/extra.css
+# extra_javascript:
+#   - javascripts/extra.js
+
+# Copyright
+# copyright: Copyright &copy; 2024 Your Name / Your Org
+
+# Optional: Google Analytics
+# extra:
+#   analytics:
+#     provider: google
+#     property: UA-XXXXXXXXX-X

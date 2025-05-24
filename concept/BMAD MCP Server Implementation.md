@@ -131,29 +131,43 @@ class BMadMCPServer:
         """Handle tool execution requests."""
         tool_request = ToolRequest(**request.params)
         
-        # Get the tool
         tool = self.tool_registry.get_tool(tool_request.name)
         if not tool:
-            raise MCPError(f"Tool not found: {tool_request.name}", code=-32602)
-        
-        # Execute the tool
-        try:
-            result = await tool.execute(tool_request.arguments)
-            
+            logger.error(f"Tool not found: {tool_request.name}")
             return MCPResponse(
                 id=request.id,
-                result={
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": result
-                        }
-                    ]
-                }
+                error=MCPError(f"Tool not found: {tool_request.name}", code=-32602)
             )
+        
+        try:
+            # Tools now return a dictionary with content, suggested_path, metadata, etc.
+            tool_output_dict = await tool.execute(tool_request.arguments)
+            
+            # The MCP response should ideally structure this dictionary in a way
+            # that the assistant can easily parse and present to the user.
+            # For example, the main content could be primary, and other details in a structured way.
+            # FastMCP might have specific ways to format complex results.
+            # For now, we'll pass the dictionary as the main result.
+            # The assistant will then need to know how to handle this structure.
+            
+            # Example: Wrap the dict in a 'structured_artifact' content block type
+            # This is a hypothetical MCP content block type.
+            # The actual format will depend on what the AI assistant expects
+            # or what FastMCP supports for complex return types.
+            
+            # A simple approach is to return the whole dictionary.
+            # The AI assistant would then be responsible for presenting this to the user.
+            return MCPResponse(
+                id=request.id,
+                result=tool_output_dict # The entire dictionary is the result
+            )
+
         except Exception as e:
-            logger.error(f"Tool execution failed: {e}")
-            raise MCPError(f"Tool execution failed: {str(e)}", code=-32603)
+            logger.error(f"Tool execution failed for {tool_request.name}: {e}", exc_info=True)
+            return MCPResponse(
+                id=request.id,
+                error=MCPError(f"Tool execution failed: {str(e)}", code=-32603)
+            )
     
     async def start_stdio(self) -> None:
         """Start the server in stdio mode."""
@@ -216,14 +230,22 @@ from pydantic import BaseModel, Field
 class BMadTool(ABC):
     """Base class for all BMAD MCP tools."""
     
-    def __init__(self):
+    def __init__(self, state_manager=None): # Accept StateManager if needed for reading context
         self.name = self.__class__.__name__.lower().replace('tool', '')
         self.description = self.__doc__ or "BMAD tool"
         self.category = "general"
-    
+        self.state_manager = state_manager # Store if provided, for reading context
+
     @abstractmethod
-    async def execute(self, arguments: Dict[str, Any]) -> str:
-        """Execute the tool with given arguments."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]: # Return type is now Dict
+        """
+        Execute the tool with given arguments.
+        Should return a dictionary containing:
+        - 'content': The generated artifact content (e.g., Markdown string).
+        - 'suggested_path': A string suggesting where the artifact might be saved (relative to .bmad).
+        - 'metadata': A dictionary of metadata for the artifact (e.g., type, status).
+        - 'message': (Optional) A message for the user/assistant.
+        """
         pass
     
     @abstractmethod
@@ -284,10 +306,10 @@ class CreateProjectBriefTool(BMadTool):
     that serve as the foundation for subsequent PRD and architecture work.
     """
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, state_manager=None):
+        super().__init__(state_manager) # Pass state_manager to base
         self.category = "planning"
-        self.description = "Generate structured project brief from user input using BMAD methodology"
+        self.description = "Generates content for a structured project brief using BMAD methodology. Does not write files."
     
     def get_input_schema(self) -> Dict[str, Any]:
         """Get input schema for project brief creation."""
@@ -319,78 +341,76 @@ class CreateProjectBriefTool(BMadTool):
             "required": ["topic"]
         }
     
-    async def execute(self, arguments: Dict[str, Any]) -> str:
-        """Execute project brief creation."""
-        # Validate inputs
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute project brief creation, returning content and suggestions."""
         validated_args = self.validate_input(arguments)
         
         topic = validated_args["topic"]
         target_audience = validated_args.get("target_audience", "General users")
         constraints = validated_args.get("constraints", [])
         scope_level = validated_args.get("scope_level", "standard")
+
+        project_name = "UnknownProject"
+        if self.state_manager:
+            project_meta = self.state_manager.get_project_meta()
+            project_name = project_meta.get("project_name", project_name)
         
-        # Load project brief template
-        template = load_template("project_brief_tmpl.md")
-        
-        # Create analyst agent
+        template_name = "project_brief_tmpl.md"
+        try:
+            template_content = load_template(template_name)
+        except FileNotFoundError:
+            logger.warning(f"Template {template_name} not found. Using default prompt structure.")
+            template_content = "Default template: Introduction, Vision, Goals, Audience, Features, Constraints."
+
         analyst = get_analyst_agent()
         
-        # Create project brief task
         brief_task = Task(
             description=f"""
-            Create a comprehensive project brief for: {topic}
-            
+            Create a comprehensive project brief for the topic: '{topic}' for project '{project_name}'.
             Target audience: {target_audience}
             Known constraints: {', '.join(constraints) if constraints else 'None specified'}
             Scope level: {scope_level}
             
-            Follow the BMAD project brief template structure:
-            1. Introduction / Problem Statement
-            2. Vision & Goals (with specific, measurable goals)
-            3. Target Audience / Users
-            4. Key Features / Scope (High-Level Ideas for MVP)
-            5. Post MVP Features / Scope and Ideas
-            6. Known Technical Constraints or Preferences
+            Follow this template structure:
+            {template_content}
             
             Ensure the brief is detailed enough to guide PRD creation and provides
             clear direction for the project scope and objectives.
             """,
-            expected_output="Complete project brief in markdown format following BMAD template",
+            expected_output="Complete project brief in markdown format.",
             agent=analyst
         )
         
-        # Create and execute crew
-        crew = Crew(
-            agents=[analyst],
-            tasks=[brief_task],
-            process=Process.sequential,
-            verbose=False
-        )
+        crew = Crew(agents=[analyst], tasks=[brief_task], process=Process.sequential, verbose=False)
+        result_content = crew.kickoff() # Assuming result is the raw string content
         
-        # Execute the crew
-        result = crew.kickoff()
+        # Prepare the structured response
+        file_name_safe_topic = topic.lower().replace(' ', '_').replace('.', '').replace('/', '_')
+        suggested_path = f"ideation/project_brief_{file_name_safe_topic}.md"
+
+        suggested_metadata = {
+            "artifact_type": "project_brief",
+            "status": "draft",
+            "topic": topic,
+            "target_audience": target_audience,
+            "scope_level": scope_level,
+            "source_template": template_name,
+            "generated_by_tool": self.name,
+            "timestamp": datetime.now().isoformat()
+        }
         
-        # Format the result
-        formatted_brief = self._format_project_brief(result.raw, topic)
-        
-        return formatted_brief
+        # No direct file writing by the tool
+        # formatted_brief = self._format_project_brief(result_content, topic) # Formatting can be part of the agent's task or assistant's responsibility
+
+        return {
+            "content": result_content, # Raw content from CrewAI
+            "suggested_path": suggested_path,
+            "metadata": suggested_metadata,
+            "message": f"Project brief content for '{topic}' generated. Please review and save to the suggested path or your preferred location within the .bmad directory."
+        }
     
-    def _format_project_brief(self, content: str, topic: str) -> str:
-        """Format the project brief with proper structure."""
-        if not content.startswith("#"):
-            content = f"# Project Brief: {topic}\n\n{content}"
-        
-        # Add metadata
-        formatted = f"""# Project Brief: {topic}
-
-{content}
-
----
-*Generated using BMAD MCP Server - Project Brief Tool*
-*Template: project_brief_tmpl.md*
-"""
-        return formatted
-
+    # _format_project_brief method might be removed or adapted if formatting is handled by CrewAI or client-side.
+    # For now, the raw content from CrewAI is returned.
 
 # bmad-mcp-server/src/bmad_mcp_server/crewai_integration/agents.py
 """

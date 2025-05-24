@@ -1,6 +1,6 @@
 Okay, I can outline the project structure and key Python code for a BMAD MCP server based on the provided implementation guide.
 
-The BMAD MCP Server is designed to expose the BMAD methodology as a set of standardized tools, allowing AI systems to interact with structured project development workflows. It utilizes Python, CrewAI for agent orchestration, and FastMCP for handling the Model Context Protocol. Artifacts and project state are managed within a `.bmad` directory in the project root, primarily using Markdown and JSON files.
+The BMAD MCP Server is designed to expose the BMAD methodology as a set of standardized tools, allowing AI systems to interact with structured project development workflows. It utilizes Python, CrewAI for agent orchestration, and FastMCP for handling the Model Context Protocol. BMAD tools will generate artifact content and suggest paths/metadata, but the AI assistant (via the IDE) will be responsible for the actual file writing, allowing user review and modification. The server tools will read existing artifacts from the `.bmad` directory for context.
 
 ---
 ## Project Structure 🏗️
@@ -213,7 +213,7 @@ if __name__ == "__main__":
 *(Code based on)*
 
 ### 4. `src/bmad_mcp_server/utils/state_manager.py`
-The `StateManager` class is responsible for all file system interactions within the `.bmad` directory. This includes creating the directory structure, saving and loading artifacts (Markdown with YAML frontmatter, JSON), and managing project metadata like the current BMAD phase.
+The `StateManager` class is primarily responsible for reading existing artifacts from the `.bmad` directory to provide context to BMAD tools. It may also handle ensuring the basic `.bmad` structure exists. It will **not** be used by server tools to directly write or modify artifacts; that responsibility lies with the AI assistant/IDE after user review.
 
 ```python
 # bmad-mcp-server/src/bmad_mcp_server/utils/state_manager.py
@@ -266,26 +266,32 @@ class StateManager:
                 "ideation": "ideation/"
             }
         }
-        self.save_json("project_meta.json", meta) # Uses relative path to bmad_dir
+        # self.save_json("project_meta.json", meta) # This would be done by assistant/user initially
+        # For now, StateManager ensures structure, but meta init is a user/assistant action.
+        # A tool could *propose* the content for project_meta.json.
+        project_meta_path = self.bmad_dir / "project_meta.json"
+        if not project_meta_path.exists():
+            logger.info(f"{project_meta_path} does not exist. It should be initialized by the user/assistant.")
+            # Or, a specific `initialize_project_tool` could return the content for this file.
 
-    def save_artifact(self, path_in_bmad: str, content: str, metadata: Optional[Dict] = None) -> str:
-        # Saves artifact, adds YAML frontmatter if .md and metadata provided
-        full_path = self.bmad_dir / path_in_bmad
+    # The save_artifact and save_json methods might be removed or repurposed
+    # if the server strictly does not write files.
+    # For now, we'll keep them but note they are not for direct use by artifact-generating tools.
+
+    def _save_artifact_content(self, full_path: Path, content: str, metadata: Optional[Dict] = None) -> None:
+        """Internal helper to format and write content. Not for direct tool use for BMAD artifacts."""
         full_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        if metadata and path_in_bmad.endswith('.md'):
+        file_content = content
+        if metadata and full_path.name.endswith('.md'):
             frontmatter_str = yaml.dump(metadata, default_flow_style=False, sort_keys=False)
             file_content = f"---\n{frontmatter_str}---\n\n{content}"
-        else:
-            file_content = content
         
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(file_content)
-        logger.info(f"Saved artifact: {path_in_bmad}")
-        return str(full_path) # Returns absolute path
+        logger.info(f"Internal save: {full_path.relative_to(self.project_root)}")
 
     def load_artifact(self, path_in_bmad: str) -> Dict[str, Any]:
-        # Loads artifact, parses YAML frontmatter if .md
+        # Loads artifact, parses YAML frontmatter if .md. This is a key function for tools.
         full_path = self.bmad_dir / path_in_bmad
         if not full_path.exists():
             raise FileNotFoundError(f"Artifact not found: {path_in_bmad}")
@@ -320,20 +326,30 @@ class StateManager:
         with open(full_path, 'r', encoding='utf-8') as f:
             return json.load(f)
             
-    def update_project_phase(self, phase: str) -> None: #
-        meta = self.load_json("project_meta.json")
-        meta["current_phase"] = phase
-        meta["phase_updated_at"] = datetime.now().isoformat()
-        self.save_json("project_meta.json", meta)
+    # def update_project_phase(self, phase: str) -> None: #
+    #     # This action would now be:
+    #     # 1. Tool proposes change to project_meta.json content.
+    #     # 2. Assistant shows user.
+    #     # 3. User approves, assistant saves the updated project_meta.json.
+    #     meta = self.load_json("project_meta.json")
+    #     meta["current_phase"] = phase
+    #     meta["phase_updated_at"] = datetime.now().isoformat()
+    #     # self.save_json("project_meta.json", meta) # No direct save by server tool
+    #     logger.info(f"Project phase update to '{phase}' proposed.")
+
 
     def get_project_meta(self) -> Dict[str, Any]: #
-        return self.load_json("project_meta.json")
+        try:
+            return self.load_json("project_meta.json")
+        except FileNotFoundError:
+            logger.warning("project_meta.json not found. Project may not be initialized.")
+            return {}
 
 ```
 *(Code adapted from)*
 
 ### 5. `src/bmad_mcp_server/tools/base.py`
-The `BMadTool` abstract base class defines the interface for all BMAD tools, including `name`, `description`, an `execute` method, and `get_input_schema` for MCP compatibility. It also includes helper methods like `create_metadata`.
+The `BMadTool` abstract base class defines the interface for all BMAD tools. The `execute` method will now return a structured dictionary containing the generated content, a suggested path, and metadata, rather than directly saving files.
 
 ```python
 # bmad-mcp-server/src/bmad_mcp_server/tools/base.py
@@ -351,7 +367,7 @@ class BMadTool(ABC):
         self.category = "general" # Default category, can be overridden by subclasses
 
     @abstractmethod
-    async def execute(self, arguments: Dict[str, Any]) -> Any: # Return type can be more specific
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]: # Return type is now a dict
         pass
 
     @abstractmethod
@@ -359,14 +375,15 @@ class BMadTool(ABC):
         # Returns JSON schema for tool's input parameters
         pass
     
-    def create_metadata(self, status: str = "draft", **kwargs) -> Dict[str, Any]: #
-        """Create standard metadata for artifacts."""
+    def create_suggested_metadata(self, artifact_type: str, status: str = "draft", **kwargs) -> Dict[str, Any]: #
+        """Create standard suggested metadata for artifacts to be returned to the assistant."""
         metadata = {
+            "artifact_type": artifact_type,
             "status": status,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat(),
-            "created_by": "BMAD-MCP-Server", # From implementation guide
-            "bmad_version": "1.0" # From implementation guide
+            "suggested_created_at": datetime.now().isoformat(),
+            "suggested_updated_at": datetime.now().isoformat(),
+            "generated_by_tool": self.name,
+            "bmad_version": "1.0" 
         }
         metadata.update(kwargs)
         return metadata
@@ -375,7 +392,7 @@ class BMadTool(ABC):
 *(Code adapted from)*
 
 ### 6. Example Tool: `src/bmad_mcp_server/tools/planning/project_brief.py`
-Each tool (e.g., `CreateProjectBriefTool`, `GeneratePRDTool`) inherits from `BMadTool`. It defines its specific input schema and implements the `execute` method, often leveraging CrewAI agents and tasks to perform its function and then using the `StateManager` to save the resulting artifact.
+Each tool (e.g., `CreateProjectBriefTool`, `GeneratePRDTool`) inherits from `BMadTool`. It defines its specific input schema and implements the `execute` method. The `execute` method will now leverage CrewAI agents for content generation and then return a dictionary containing the generated content, a suggested file path, and metadata, instead of saving the file.
 
 ```python
 # bmad-mcp-server/src/bmad_mcp_server/tools/planning/project_brief.py
@@ -416,24 +433,31 @@ class CreateProjectBriefTool(BMadTool):
             "required": ["topic"]
         }
 
-    async def execute(self, arguments: Dict[str, Any]) -> str: # Returns the generated brief content
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]: # Returns a dict
         topic = arguments["topic"]
         target_audience = arguments.get("target_audience", "General users")
         constraints = arguments.get("constraints", [])
         scope_level = arguments.get("scope_level", "standard")
 
-        analyst_agent = get_analyst_agent() # Get pre-configured CrewAI agent
-        
-        # Load a template for the brief, e.g., from .templates/project-brief-tmpl.md
-        brief_template = load_template("project-brief-tmpl.md")
+        # Try to load project_meta.json for context if available
+        project_meta = self.state_manager.get_project_meta()
+        project_name = project_meta.get("project_name", "UnknownProject")
 
-        # Define the CrewAI task
+        analyst_agent = get_analyst_agent() 
+        
+        brief_template_name = "project_brief_tmpl.md"
+        try:
+            brief_template = load_template(brief_template_name)
+        except FileNotFoundError:
+            brief_template = "Ensure standard project brief sections: Introduction, Vision & Goals, Target Audience, Key Features, Constraints."
+            # Log a warning that the template was not found
+        
         task_description = f"""
-        Create a comprehensive project brief for the topic: '{topic}'.
+        Create a comprehensive project brief for the topic: '{topic}' for project '{project_name}'.
         Target Audience: {target_audience}
         Constraints: {', '.join(constraints) if constraints else 'None'}
         Scope Level: {scope_level}
-        Use the following template structure:
+        Use the following template structure if provided, otherwise use standard sections:
         {brief_template}
         Fill all sections thoughtfully to guide PRD creation.
         """
@@ -443,34 +467,39 @@ class CreateProjectBriefTool(BMadTool):
             agent=analyst_agent
         )
 
-        # Create and run the Crew
         project_crew = Crew(
             agents=[analyst_agent],
             tasks=[brief_task],
             process=Process.sequential,
-            verbose=False # Or configure via server config
+            verbose=False 
         )
         
-        # The kickoff method in CrewAI might be synchronous or need await depending on version/setup.
-        # Assuming kickoff is synchronous and result.raw contains the string output as per the guide
         crew_result = project_crew.kickoff() 
-        generated_brief_content = crew_result # Or crew_result.raw if it's an object
+        generated_brief_content = crew_result # Or crew_result.raw
 
-        # Save the artifact using StateManager
-        metadata = self.create_metadata(
-            status="completed", 
+        # Prepare the structured response for the assistant
+        file_name = f"project_brief_{topic.lower().replace(' ', '_').replace('.', '')}.md"
+        suggested_path = f"ideation/{file_name}" # Relative to .bmad directory
+
+        suggested_metadata = self.create_suggested_metadata(
+            artifact_type="project_brief",
+            status="draft", 
             topic=topic, 
             target_audience=target_audience,
-            scope_level=scope_level
+            scope_level=scope_level,
+            source_template=brief_template_name
         )
-        # Define a standardized path within .bmad, e.g., ideation/project_brief_TOPIC.md
-        file_name = f"project_brief_{topic.lower().replace(' ', '_').replace('.', '')}.md"
-        artifact_path_in_bmad = f"ideation/{file_name}"
         
-        self.state_manager.save_artifact(artifact_path_in_bmad, generated_brief_content, metadata)
-        self.state_manager.update_project_phase("project_brief_completed") #
+        # The tool no longer saves the file or updates the project phase directly.
+        # self.state_manager.save_artifact(artifact_path_in_bmad, generated_brief_content, metadata)
+        # self.state_manager.update_project_phase("project_brief_completed") 
 
-        return generated_brief_content # Return the content for the MCP response
+        return {
+            "content": generated_brief_content,
+            "suggested_path": suggested_path,
+            "metadata": suggested_metadata,
+            "message": f"Project brief content for '{topic}' generated. Please review and save to the suggested path or your preferred location within the .bmad directory."
+        }
 ```
 *(Code adapted from)*
 

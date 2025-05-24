@@ -72,57 +72,65 @@ class BMadWorkflowExample:
             "scope_level": "standard"
         })
         
-        self.project_state["project_brief"] = brief_result
-        print("✅ Project brief created successfully")
-        print(f"📄 Brief length: {len(brief_result)} characters")
+        brief_result_dict = await self._call_tool(bmad_tools, "create_project_brief", {
+            "topic": "AI-powered personal finance assistant",
+            "target_audience": "young professionals aged 25-35",
+            "constraints": [
+                "Must be mobile-first",
+                "Integration with major banks required",
+                "GDPR compliance mandatory"
+            ],
+            "scope_level": "standard"
+        })
+        
+        self.project_state["project_brief"] = brief_result_dict["content"]
+        print(f"✅ Project brief content generated. Suggested path: {brief_result_dict['suggested_path']}")
+        print(f"📄 Brief length: {len(self.project_state['project_brief'])} characters")
+        # In a real scenario, the assistant would now prompt the user to save this content.
     
     async def _step_2_generate_prd(self, bmad_tools):
         """Step 2: Generate comprehensive PRD."""
         print("\n📊 Step 2: Generating PRD")
         print("-" * 30)
         
-        prd_result = await self._call_tool(bmad_tools, "generate_prd", {
-            "project_brief": self.project_state["project_brief"],
+        prd_result_dict = await self._call_tool(bmad_tools, "generate_prd", {
+            "project_brief": self.project_state["project_brief"], # Pass the content
             "workflow_mode": "incremental",
             "technical_depth": "standard"
         })
         
-        self.project_state["prd"] = prd_result
-        print("✅ PRD generated successfully")
-        print(f"📄 PRD length: {len(prd_result)} characters")
+        self.project_state["prd"] = prd_result_dict["content"]
+        print(f"✅ PRD content generated. Suggested path: {prd_result_dict['suggested_path']}")
+        print(f"📄 PRD length: {len(self.project_state['prd'])} characters")
         
-        # Extract epic count from PRD (simple parsing)
-        epic_count = prd_result.count("Epic ")
-        print(f"📈 Generated {epic_count} epics")
+        epic_count = self.project_state["prd"].count("Epic ")
+        print(f"📈 Generated {epic_count} epics (from content analysis)")
     
     async def _step_3_validate_requirements(self, bmad_tools):
         """Step 3: Validate PRD quality."""
         print("\n🔍 Step 3: Validating Requirements")
         print("-" * 30)
         
-        validation_result = await self._call_tool(bmad_tools, "validate_requirements", {
-            "prd_content": self.project_state["prd"],
-            "checklist_type": "standard"
+        validation_result_dict = await self._call_tool(bmad_tools, "validate_requirements", {
+            "prd_content": self.project_state["prd"], # Pass the content
+            "checklist_type": "standard" # This should align with actual checklist names, e.g., "pm_checklist"
         })
         
-        self.project_state["prd_validation"] = validation_result
-        print("✅ Requirements validation completed")
+        self.project_state["prd_validation"] = validation_result_dict["content"]
+        print(f"✅ Requirements validation report generated. Suggested path: {validation_result_dict['suggested_path']}")
         
-        # Simple validation summary
-        if "PASS" in validation_result:
-            print("🟢 PRD passed quality checks")
-        elif "FAIL" in validation_result:
-            print("🟡 PRD has areas for improvement")
+        if "EXCELLENT" in self.project_state["prd_validation"] or "GOOD" in self.project_state["prd_validation"]:
+            print("🟢 PRD quality looks good based on report.")
         else:
-            print("🔵 Validation completed with recommendations")
+            print("🟡 PRD report suggests areas for improvement.")
     
     async def _step_4_create_architecture(self, bmad_tools):
         """Step 4: Create technical architecture."""
         print("\n🏗️ Step 4: Creating Architecture")
         print("-" * 30)
         
-        architecture_result = await self._call_tool(bmad_tools, "create_architecture", {
-            "prd_content": self.project_state["prd"],
+        architecture_result_dict = await self._call_tool(bmad_tools, "create_architecture", {
+            "prd_content": self.project_state["prd"], # Pass the content
             "tech_preferences": {
                 "backend_framework": "FastAPI",
                 "database": "PostgreSQL",
@@ -132,80 +140,85 @@ class BMadWorkflowExample:
             "architecture_type": "microservices"
         })
         
-        self.project_state["architecture"] = architecture_result
-        print("✅ Architecture created successfully")
-        print(f"📄 Architecture length: {len(architecture_result)} characters")
+        self.project_state["architecture"] = architecture_result_dict["content"]
+        print(f"✅ Architecture content generated. Suggested path: {architecture_result_dict['suggested_path']}")
+        print(f"📄 Architecture length: {len(self.project_state['architecture'])} characters")
     
     async def _step_5_create_frontend_architecture(self, bmad_tools):
         """Step 5: Create frontend architecture."""
         print("\n🎨 Step 5: Creating Frontend Architecture")
         print("-" * 30)
         
-        frontend_arch_result = await self._call_tool(bmad_tools, "create_frontend_architecture", {
-            "main_architecture": self.project_state["architecture"],
+        frontend_arch_result_dict = await self._call_tool(bmad_tools, "create_frontend_architecture", {
+            "main_architecture": self.project_state["architecture"], # Pass the content
             "framework_preference": "React Native"
         })
         
-        self.project_state["frontend_architecture"] = frontend_arch_result
-        print("✅ Frontend architecture created successfully")
-        print(f"📄 Frontend arch length: {len(frontend_arch_result)} characters")
+        self.project_state["frontend_architecture"] = frontend_arch_result_dict["content"]
+        print(f"✅ Frontend architecture content generated. Suggested path: {frontend_arch_result_dict['suggested_path']}")
+        print(f"📄 Frontend arch length: {len(self.project_state['frontend_architecture'])} characters")
     
     async def _step_6_create_first_story(self, bmad_tools):
         """Step 6: Create first development story."""
         print("\n📝 Step 6: Creating First Story")
         print("-" * 30)
         
-        story_result = await self._call_tool(bmad_tools, "create_next_story", {
-            "prd_content": self.project_state["prd"],
-            "architecture_content": self.project_state["architecture"],
+        story_result_dict = await self._call_tool(bmad_tools, "create_next_story", {
+            "prd_content": self.project_state["prd"], # Pass the content
+            "architecture_content": self.project_state["architecture"], # Pass the content
             "current_progress": {
                 "completed_stories": [],
-                "current_epic": 1
+                "current_epic": 1 # Assuming epic numbers are used
             }
         })
         
-        self.project_state["first_story"] = story_result
-        print("✅ First story created successfully")
-        print(f"📄 Story length: {len(story_result)} characters")
+        self.project_state["first_story"] = story_result_dict["content"]
+        print(f"✅ First story content generated. Suggested path: {story_result_dict['suggested_path']}")
+        print(f"📄 Story length: {len(self.project_state['first_story'])} characters")
     
     async def _step_7_validate_story(self, bmad_tools):
         """Step 7: Validate story quality."""
         print("\n✅ Step 7: Validating Story")
         print("-" * 30)
         
-        story_validation_result = await self._call_tool(bmad_tools, "validate_story", {
-            "story_content": self.project_state["first_story"],
-            "checklist_types": ["story_draft_checklist", "story_dod_checklist"]
+        story_validation_result_dict = await self._call_tool(bmad_tools, "validate_story", {
+            "story_content": self.project_state["first_story"], # Pass the content
+            "checklist_types": ["story_draft_checklist", "story_dod_checklist"] # These should be valid checklist names
         })
         
-        self.project_state["story_validation"] = story_validation_result
-        print("✅ Story validation completed")
+        self.project_state["story_validation"] = story_validation_result_dict["content"]
+        print(f"✅ Story validation report generated. Suggested path: {story_validation_result_dict['suggested_path']}")
         
-        # Simple validation summary
-        if "READY" in story_validation_result:
-            print("🟢 Story is ready for development")
+        if "READY" in self.project_state["story_validation"] or "EXCELLENT" in self.project_state["story_validation"]: # Adjust based on actual report content
+            print("🟢 Story appears ready for development based on report.")
         else:
-            print("🟡 Story needs improvements before development")
+            print("🟡 Story report suggests improvements needed.")
     
-    async def _call_tool(self, bmad_tools, tool_name: str, arguments: Dict[str, Any]) -> str:
+    async def _call_tool(self, bmad_tools, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]: # Returns Dict
         """Helper method to call BMAD tools."""
-        print(f"🔧 Calling tool: {tool_name}")
+        print(f"🔧 Calling tool: {tool_name} with arguments: {json.dumps(arguments, indent=2, default=lambda o: '<not serializable>')[:200]}...") # Log args carefully
         
-        # In a real implementation, this would use the actual MCP client
-        # For this example, we'll simulate the tool call
+        # This would be the actual MCP client call
+        # tool_instance = next(t for t in bmad_tools if t.name == tool_name)
+        # result_dict = await tool_instance.run(arguments) # Or however the MCPServerAdapter exposes run
         
-        # Simulate tool execution time
-        await asyncio.sleep(1)
+        # For this example, we'll simulate the tool call and its structured response
+        await asyncio.sleep(0.1) # Reduced sleep
         
-        # Return simulated response based on tool
-        return self._simulate_tool_response(tool_name, arguments)
+        # Simulate the structured dictionary response
+        return self._simulate_tool_response_dict(tool_name, arguments)
     
-    def _simulate_tool_response(self, tool_name: str, arguments: Dict[str, Any]) -> str:
-        """Simulate tool responses for example purposes."""
+    def _simulate_tool_response_dict(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Simulate structured tool responses for example purposes."""
         
-        if tool_name == "create_project_brief":
-            return f"""# Project Brief: {arguments['topic']}
+        # Generic content generation for simulation
+        content = f"# Simulated Content for {tool_name}\n\nArguments received:\n{json.dumps(arguments, indent=2, default=lambda o: '<not serializable>')}"
+        suggested_path = f"simulated/{tool_name.replace('_', '-')}-output.md"
+        metadata = {"tool_used": tool_name, "simulated_at": asyncio.get_event_loop().time()}
+        message = f"Simulated content for {tool_name} generated."
 
+        if tool_name == "create_project_brief":
+            content = f"""# Project Brief: {arguments['topic']}
 ## Introduction / Problem Statement
 Young professionals struggle with managing their personal finances effectively due to lack of time, financial literacy, and intuitive tools that understand their specific needs and banking relationships.
 
@@ -233,11 +246,6 @@ Young professionals aged 25-35 who are digitally native, have steady income, and
 - Real-time transaction processing
 - Secure data encryption
 
-*Generated using BMAD MCP Server*"""
-
-        elif tool_name == "generate_prd":
-            return """# AI-Powered Personal Finance Assistant PRD
-
 ## Goal, Objective and Context
 Create a mobile-first AI-powered personal finance assistant that helps young professionals manage their finances through automated insights, savings recommendations, and banking integration.
 
@@ -260,30 +268,16 @@ Create a mobile-first AI-powered personal finance assistant that helps young pro
 
 - Story 3.1: As a user, I want my transactions automatically categorized, so that I can understand my spending patterns.
 - Story 3.2: As a user, I want to see spending insights and trends, so that I can make informed financial decisions.
-
-*Generated using BMAD MCP Server*"""
-
-        elif tool_name == "validate_requirements":
-            return """# Requirements Validation Report
-
 ## Validation Summary
-- ✅ Problem Definition & Context: PASS
-- ✅ MVP Scope Definition: PASS  
-- ⚠️ User Experience Requirements: PARTIAL
-- ✅ Functional Requirements: PASS
-- ✅ Epic & Story Structure: PASS
-
-## Recommendations
-1. Add more detailed user journey specifications
-2. Include accessibility requirements
-3. Define performance benchmarks
-
-## Overall Status: READY FOR ARCHITECTURE
-The PRD meets BMAD quality standards and is ready for technical architecture design."""
+- ✅ Item 1: PASS
+- ⚠️ Item 2: NEEDS IMPROVEMENT
+(Content similar to original but without the *Generated by* footer)"""
+            checklist_name = arguments.get('checklist_type', arguments.get('checklist_types', ['unknown'])[0])
+            suggested_path = f"checklists/validation_report_{checklist_name}.md"
+            metadata.update({"artifact_type": "validation_report", "checklist": checklist_name})
 
         elif tool_name == "create_architecture":
-            return """# AI-Powered Personal Finance Assistant Architecture
-
+            content = """# AI-Powered Personal Finance Assistant Architecture
 ## Technical Summary
 Microservices architecture using FastAPI backend services, PostgreSQL for transactional data, Redis for caching, deployed on AWS with containerized services for scalability and security.
 
@@ -297,12 +291,6 @@ The system follows a microservices architecture pattern with API Gateway, separa
 - Message Queue: AWS SQS
 - Container: Docker with Kubernetes
 - Cloud: AWS (ECS, RDS, ElastiCache)
-
-*Generated using BMAD MCP Server*"""
-
-        elif tool_name == "create_frontend_architecture":
-            return """# Frontend Architecture - Personal Finance Assistant
-
 ## Framework & Core Libraries
 - React Native 0.72+ for cross-platform mobile development
 - TypeScript for type safety
@@ -313,14 +301,7 @@ The system follows a microservices architecture pattern with API Gateway, separa
 - Atomic design principles with reusable UI components
 - Screen-based organization with shared components
 - Secure storage for authentication tokens
-
-*Generated using BMAD MCP Server*"""
-
-        elif tool_name == "create_next_story":
-            return """# Story 1.1: Infrastructure Setup
-
 ## Status: Draft
-
 ## Story
 As a developer, I want to set up secure cloud infrastructure on AWS, so that we can safely handle financial data with proper encryption and compliance.
 
@@ -354,19 +335,6 @@ As a developer, I want to set up secure cloud infrastructure on AWS, so that we 
 1. Add specific testing criteria for infrastructure validation
 2. Include rollback procedures for failed deployments
 
-## Final Assessment: READY
-The story provides sufficient context for implementation with minor testing enhancements recommended."""
-
-        else:
-            return f"Simulated response for {tool_name} with arguments: {json.dumps(arguments, indent=2)}"
-
-async def main():
-    """Run the example workflow."""
-    example = BMadWorkflowExample()
-    await example.run_complete_workflow()
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 
 # examples/simple_tool_usage.py

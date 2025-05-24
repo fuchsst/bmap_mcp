@@ -1,8 +1,10 @@
 """
 Architecture creation tool using BMAD methodology.
+Returns generated content and suggestions to the assistant.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Literal # Added Literal
+from datetime import datetime # Added import
 from crewai import Agent, Crew, Task, Process
 from pydantic import BaseModel, Field
 import json
@@ -10,7 +12,7 @@ import logging
 
 from ..base import BMadTool
 from ...crewai_integration.agents import get_architect_agent
-from ...templates.loader import load_template
+from ...crewai_integration.config import CrewAIConfig
 from ...utils.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
@@ -44,168 +46,98 @@ class ArchitectureRequest(BaseModel):
     )
 
 
-class ArchitectureResult(BaseModel):
-    """Result model for architecture creation."""
-    architecture_content: str = Field(..., description="Generated architecture content")
-    complexity_score: int = Field(..., description="Calculated complexity score")
-    architecture_type: str = Field(..., description="Architecture type used")
-    artifact_path: str = Field(..., description="Path where architecture was saved")
-
 
 class CreateArchitectureTool(BMadTool):
     """
-    Generate technical architecture from PRD requirements using BMAD methodology.
-    
+    Generates content for a technical architecture from PRD requirements using BMAD methodology.
     This tool creates comprehensive architecture documents with technology selections,
     component designs, and implementation guidance optimized for AI agent development.
     """
     
-    def __init__(self, state_manager: StateManager):
-        super().__init__(state_manager)
+    def __init__(self, state_manager: StateManager, crew_ai_config: CrewAIConfig):
+        super().__init__(state_manager, crew_ai_config)
         self.category = "architecture"
-        self.description = "Generate comprehensive technical architecture from PRD requirements"
+        self.description = "Generates content for a technical architecture from PRD. Does not write files."
     
     def get_input_schema(self) -> Dict[str, Any]:
         """Get input schema for architecture creation using Pydantic model."""
         schema = ArchitectureRequest.model_json_schema()
-        # Add enum constraints
+        # Ensure enums are correctly represented
         schema["properties"]["architecture_type"]["enum"] = ["monolith", "modular_monolith", "microservices", "serverless"]
-        schema["properties"]["tech_preferences"]["properties"]["api_style"]["enum"] = ["REST", "GraphQL", "gRPC"]
-        schema["properties"]["tech_preferences"]["properties"]["deployment_style"]["enum"] = ["containers", "serverless", "traditional"]
+        # Enums for TechPreferences are often handled by Pydantic's schema generation if Literal is used,
+        # but can be explicitly set if needed, e.g., for older Pydantic or specific FastMCP behavior.
+        # For nested models, FastMCP might require explicit full schema definition if it doesn't auto-resolve.
+        # For now, assuming Pydantic schema for TechPreferences is sufficient.
         return schema
     
-    async def execute(self, arguments: Dict[str, Any]) -> str:
-        """Execute architecture generation."""
-        # Validate input using Pydantic
-        request = ArchitectureRequest(**arguments)
-        
-        logger.info("Starting architecture generation")
-        
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute architecture generation and return content and suggestions."""
+        try:
+            args = ArchitectureRequest(**arguments)
+        except Exception as e:
+            logger.error(f"Input validation failed for CreateArchitectureTool: {e}", exc_info=True)
+            raise ValueError(f"Invalid arguments for CreateArchitectureTool: {e}")
+
+        logger.info(f"Generating architecture content of type: {args.architecture_type}")
+
         # Analyze PRD complexity
-        complexity_score = self._calculate_complexity_score(request.prd_content)
+        complexity_score = self._calculate_complexity_score(args.prd_content)
         
-        # Suggest architecture type based on complexity if not specified
-        architecture_type = request.architecture_type
-        if complexity_score >= 8:
-            architecture_type = "microservices"
-        elif complexity_score >= 6:
-            architecture_type = "modular_monolith"
+        effective_architecture_type = args.architecture_type
+        if complexity_score >= 8 and args.architecture_type not in ["microservices", "serverless"]:
+            effective_architecture_type = "microservices"
+        elif complexity_score >= 6 and args.architecture_type == "monolith":
+            effective_architecture_type = "modular_monolith"
         
-        # Create architect agent
-        architect_agent = get_architect_agent()
+        # Create architect agent using the passed CrewAIConfig
+        architect_agent = get_architect_agent(config=self.crew_ai_config)
         
-        # Prepare technology preferences text
         tech_prefs_text = ""
-        if request.tech_preferences:
-            tech_dict = request.tech_preferences.model_dump(exclude_none=True)
+        if args.tech_preferences:
+            tech_dict = args.tech_preferences.model_dump(exclude_none=True)
             if tech_dict:
                 tech_prefs_text = f"Technology Preferences: {json.dumps(tech_dict, indent=2)}"
         
-        # Create architecture generation task
-        architecture_task = Task(
-            description=f"""
-            Create a comprehensive technical architecture document based on these requirements:
-            
-            {request.prd_content}
-            
-            Architecture Parameters:
-            - Recommended Architecture Type: {architecture_type}
-            - Complexity Score: {complexity_score}/10
-            {tech_prefs_text}
-            
-            Follow the BMAD architecture template structure:
-            1. Technical Summary
-            2. High-Level Overview with architecture diagrams (Mermaid)
-            3. Architectural/Design Patterns Adopted
-            4. Component View with detailed descriptions
-            5. Project Structure with complete directory layout
-            6. API Reference for external and internal APIs
-            7. Data Models with complete schemas
-            8. Definitive Tech Stack Selections (specific versions)
-            9. Infrastructure and Deployment Overview
-            10. Error Handling Strategy
-            11. Coding Standards (focused on AI agent implementation)
-            12. Overall Testing Strategy
-            13. Security Best Practices
-            
-            Ensure the architecture:
-            - Supports all functional and non-functional requirements
-            - Is optimized for AI agent implementation
-            - Follows BMAD best practices
-            - Includes specific technology versions and justifications
-            - Provides clear implementation guidance
-            """,
-            expected_output="Complete architecture document in markdown format following BMAD template",
-            agent=architect_agent
-        )
+        architecture_task_description = f"""
+        Create a comprehensive technical architecture document based on these requirements:
         
-        # Execute architecture generation
-        crew = Crew(
-            agents=[architect_agent],
-            tasks=[architecture_task],
-            process=Process.sequential,
-            verbose=False
-        )
+        {args.prd_content}
         
-        result = crew.kickoff()
-        architecture_content = result.raw if hasattr(result, 'raw') else str(result)
+        Architecture Parameters:
+        - Architecture Type: {effective_architecture_type}
+        - Complexity Score (1-10): {complexity_score}/10
+        {tech_prefs_text}
         
-        # Format the final architecture
-        formatted_arch = self._format_architecture(
-            architecture_content,
-            request.include_frontend_prompt
-        )
+        Follow the BMAD architecture template structure:
+        1. Technical Summary
+        2. High-Level Overview with architecture diagrams (Mermaid format for diagrams)
+        3. Architectural/Design Patterns Adopted
+        4. Component View with detailed descriptions
+        5. Project Structure with complete directory layout (as a code block)
+        6. API Reference for external and internal APIs (if any)
+        7. Data Models with complete schemas (e.g., Pydantic models or SQL DDL)
+        8. Definitive Tech Stack Selections (including specific versions where appropriate)
+        9. Infrastructure and Deployment Overview
+        10. Error Handling Strategy
+        11. Coding Standards (focused on AI agent implementation)
+        12. Overall Testing Strategy
+        13. Security Best Practices
         
-        # Save the artifact
-        metadata = self.create_metadata(
-            status="completed",
-            architecture_type=architecture_type,
-            complexity_score=complexity_score,
-            tech_preferences=request.tech_preferences.model_dump(exclude_none=True)
-        )
-        
-        # Generate filename
-        prd_topic_sanitized = "".join(c if c.isalnum() or c in (' ', '_') else '_' for c in request.prd_content[:30])
-        prd_topic_sanitized = prd_topic_sanitized.replace(' ', '_').lower()
-        if not prd_topic_sanitized: # Handle empty or fully sanitized topic
-            prd_topic_sanitized = "unnamed_project"
-            
-        file_name = f"architecture_{architecture_type}_{prd_topic_sanitized}.md"
-        artifact_path = f"architecture/{file_name}"
-        
-        await self.state_manager.save_artifact(artifact_path, formatted_arch, metadata)
-        await self.state_manager.update_project_phase("architecture_completed")
-        
-        logger.info(f"Architecture saved to: {artifact_path}")
-        
-        return formatted_arch
-    
-    def _calculate_complexity_score(self, prd_content: str) -> int:
-        """Calculate architecture complexity score based on PRD content."""
-        prd_lines = len(prd_content.split('\n'))
-        epic_count = prd_content.count("Epic ")
-        integration_count = prd_content.lower().count("integration")
-        api_count = prd_content.lower().count("api")
-        
-        # Calculate complexity score (1-10)
-        complexity_factors = [
-            min(prd_lines // 50, 3),  # Document size
-            min(epic_count, 3),       # Number of epics
-            min(integration_count, 2), # Integration complexity
-            min(api_count, 2)         # API complexity
-        ]
-        
-        return min(sum(complexity_factors), 10)
-    
-    def _format_architecture(self, content: str, include_frontend_prompt: bool) -> str:
-        """Format architecture document with proper structure."""
-        formatted = content
-        
-        if include_frontend_prompt and "frontend" in content.lower():
-            frontend_prompt = """
+        Ensure the architecture:
+        - Supports all functional and non-functional requirements from the PRD.
+        - Is optimized for AI agent implementation.
+        - Follows BMAD best practices.
+        - Includes specific technology versions and justifications where critical.
+        - Provides clear implementation guidance.
+        The final output should be a complete architecture document in well-formatted markdown.
+        """
+
+        if args.include_frontend_prompt and "frontend" in args.prd_content.lower():
+            architecture_task_description += """
+
 ---
 
-## Prompt for Design Architect (Frontend Architecture Mode)
+## Prompt for Design Architect (Frontend Architecture Mode) (To be included at the end)
 
 Based on the main architecture document above, please create a comprehensive frontend architecture that:
 
@@ -218,7 +150,61 @@ Based on the main architecture document above, please create a comprehensive fro
 
 Use the main architecture's technology stack as the foundation and elaborate on frontend-specific concerns while maintaining consistency with the overall system design.
 """
-            formatted += frontend_prompt
+
+        architecture_task = Task(
+            description=architecture_task_description,
+            expected_output="Complete architecture document in markdown format, adhering to the BMAD template. Include Mermaid diagrams for overviews and component interactions where appropriate. If requested, include the 'Prompt for Design Architect' section at the end.",
+            agent=architect_agent
+        )
         
-        formatted += "\n\n---\n*Generated using BMAD MCP Server - Architecture Creation Tool*"
-        return formatted
+        crew = Crew(
+            agents=[architect_agent],
+            tasks=[architecture_task],
+            process=Process.sequential,
+            verbose=self.crew_ai_config.verbose_logging
+        )
+        
+        try:
+            result = crew.kickoff()
+            generated_arch_content = result.raw if hasattr(result, 'raw') else str(result)
+        except Exception as e:
+            logger.error(f"CrewAI kickoff failed for architecture generation: {e}", exc_info=True)
+            raise Exception(f"Architecture generation by CrewAI failed: {e}")
+        
+        # Determine a suggested path
+        prd_topic_line = args.prd_content.split('\n', 1)[0] # Get first line for a hint
+        safe_topic = "".join(c if c.isalnum() else '_' for c in prd_topic_line[:30]).strip('_').lower()
+        if not safe_topic: safe_topic = "architecture"
+        suggested_path = f"architecture/arch_{effective_architecture_type}_{safe_topic}.md"
+
+        suggested_metadata = self.create_suggested_metadata(
+            artifact_type="architecture_document",
+            status="draft",
+            architecture_type=effective_architecture_type,
+            complexity_score=complexity_score,
+            tech_preferences_used=args.tech_preferences.model_dump(exclude_none=True) if args.tech_preferences else {}
+        )
+        
+        logger.info(f"Architecture document content generated for type: {effective_architecture_type}")
+        
+        return {
+            "content": generated_arch_content,
+            "suggested_path": suggested_path,
+            "metadata": suggested_metadata,
+            "message": "Architecture document content generated. Please review and save."
+        }
+    
+    def _calculate_complexity_score(self, prd_content: str) -> int:
+        """Calculate architecture complexity score based on PRD content."""
+        prd_lines = len(prd_content.split('\n'))
+        epic_count = prd_content.count("Epic ") # Case-sensitive count
+        integration_count = prd_content.lower().count("integration")
+        api_count = prd_content.lower().count("api")
+        
+        complexity_factors = [
+            min(prd_lines // 100, 3),  # Adjusted divisor for lines
+            min(epic_count // 2, 3),   # Adjusted for epic count
+            min(integration_count // 2, 2),
+            min(api_count // 2, 2)
+        ]
+        return max(1, min(sum(complexity_factors), 10)) # Ensure score is at least 1

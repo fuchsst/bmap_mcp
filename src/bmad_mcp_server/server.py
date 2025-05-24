@@ -9,14 +9,26 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from fastmcp import FastMCP
+from pydantic import BaseModel
 
 from .utils.state_manager import StateManager
 from .utils.logging import setup_logging
 from .crewai_integration.config import CrewAIConfig
-from .tools.base import BMadTool
+
+# Import Pydantic models from tool files
+from .tools.planning.project_brief import CreateProjectBriefTool
+from .tools.planning.generate_prd import GeneratePRDTool, PRDGenerationRequest
+from .tools.planning.validate_requirements import ValidateRequirementsTool, RequirementsValidationRequest
+from .tools.architecture.create_architecture import CreateArchitectureTool, ArchitectureRequest, TechPreferences
+from .tools.architecture.frontend_architecture import CreateFrontendArchitectureTool, FrontendArchitectureRequest
+from .tools.story.create_story import CreateNextStoryTool, CreateStoryRequest, CurrentProgress
+from .tools.story.validate_story import ValidateStoryTool, StoryValidationRequest
+from .tools.validation.run_checklist import RunChecklistTool, ChecklistRequest, ValidationContext, ChecklistType
+from .tools.validation.correct_course import CorrectCourseTool, CorrectCourseRequest, ChangeContext
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +54,8 @@ class BMadMCPServer:
         
         # Initialize components
         self.state_manager = StateManager(project_root=self.project_root)
-        self.crewai_config = CrewAIConfig()
+        self.crewai_config = CrewAIConfig() # TODO: Pass LLM configs from server_config to crewai_config
         self.mcp = FastMCP("BMAD-Server", version="1.0.0")
-        
-        # Tool registry
-        self.tools: Dict[str, BMadTool] = {}
         
         # Setup logging
         log_level = self.config.get("log_level", "INFO")
@@ -56,11 +65,12 @@ class BMadMCPServer:
         setup_logging(level=log_level, log_file=log_file)
         
         # Register all BMAD tools
-        self._register_tools()
+        self._register_native_tools()
         
         logger.info("BMAD MCP Server initialized successfully")
         logger.info(f"Project root: {self.project_root}")
-        logger.info(f"Registered {len(self.tools)} BMAD tools")
+        # FastMCP handles tool listing, so self.tools might not be needed in the same way
+        # logger.info(f"Registered tools via FastMCP decorators") 
     
     def _load_config(self, config_path: Optional[Path]) -> Dict[str, Any]:
         """Load server configuration."""
@@ -84,76 +94,178 @@ class BMadMCPServer:
                 logger.warning(f"Failed to load config from {config_path}: {e}")
         
         return default_config
-    
-    def _register_tools(self) -> None:
-        """Register all BMAD tools with the MCP server."""
-        # Import tools here to avoid circular imports
-        from .tools.planning.project_brief import CreateProjectBriefTool
-        from .tools.planning.generate_prd import GeneratePRDTool
-        from .tools.planning.validate_requirements import ValidateRequirementsTool
-        from .tools.architecture.create_architecture import CreateArchitectureTool
-        from .tools.architecture.frontend_architecture import CreateFrontendArchitectureTool
-        from .tools.story.create_story import CreateNextStoryTool
-        from .tools.story.validate_story import ValidateStoryTool
-        from .tools.validation.run_checklist import RunChecklistTool
-        from .tools.validation.correct_course import CorrectCourseTool
+
+    def _register_native_tools(self) -> None:
+        """Register all BMAD tools with FastMCP using explicit function definitions."""
+
+        # --- Planning Tools ---
+        @self.mcp.tool()
+        async def create_project_brief(
+            topic: str,
+            target_audience: Optional[str] = "General users",
+            constraints: Optional[List[str]] = None, # Handled by Field(default_factory=list) in Pydantic
+            scope_level: Literal["minimal", "standard", "comprehensive"] = "standard"
+        ) -> Dict[str, Any]:
+            """Generate a structured project brief following BMAD methodology."""
+            tool_instance = CreateProjectBriefTool(self.state_manager, self.crewai_config)
+            # The tool's execute method expects a dict, matching its Pydantic model
+            return await tool_instance.execute({
+                "topic": topic,
+                "target_audience": target_audience,
+                "constraints": constraints or [], # Ensure list if None
+                "scope_level": scope_level
+            })
+
+        @self.mcp.tool()
+        async def generate_prd(
+            project_brief_content: str, # Renamed from project_brief in original tool schema
+            workflow_mode: Literal["incremental", "yolo"] = "incremental",
+            technical_depth: Literal["basic", "standard", "detailed"] = "standard",
+            include_architecture_prompt: bool = True
+        ) -> Dict[str, Any]:
+            """Generate comprehensive PRD with epics and user stories from project brief."""
+            tool_instance = GeneratePRDTool(self.state_manager, self.crewai_config)
+            return await tool_instance.execute({
+                "project_brief_content": project_brief_content,
+                "workflow_mode": workflow_mode,
+                "technical_depth": technical_depth,
+                "include_architecture_prompt": include_architecture_prompt
+            })
+
+        @self.mcp.tool()
+        async def validate_requirements(
+            prd_content: str,
+            checklist_type: Literal["pm_checklist", "standard", "comprehensive"] = "pm_checklist",
+            validation_mode: Literal["strict", "standard", "lenient"] = "standard",
+            include_recommendations: bool = True
+        ) -> Dict[str, Any]:
+            """Validate PRD documents against PM quality checklists."""
+            tool_instance = ValidateRequirementsTool(self.state_manager, self.crewai_config)
+            return await tool_instance.execute({
+                "prd_content": prd_content,
+                "checklist_type": checklist_type,
+                "validation_mode": validation_mode,
+                "include_recommendations": include_recommendations
+            })
+
+        # --- Architecture Tools ---
+        @self.mcp.tool()
+        async def create_architecture(
+            prd_content: str,
+            tech_preferences: Optional[TechPreferences] = None, # Pydantic model
+            architecture_type: Literal["monolith", "modular_monolith", "microservices", "serverless"] = "monolith",
+            include_frontend_prompt: bool = True
+        ) -> Dict[str, Any]:
+            """Generate comprehensive technical architecture from PRD requirements."""
+            tool_instance = CreateArchitectureTool(self.state_manager, self.crewai_config)
+            # Pass tech_preferences as a dict if not None, else Pydantic model in tool will use default_factory
+            tech_prefs_dict = tech_preferences.model_dump() if tech_preferences else {}
+            return await tool_instance.execute({
+                "prd_content": prd_content,
+                "tech_preferences": tech_prefs_dict,
+                "architecture_type": architecture_type,
+                "include_frontend_prompt": include_frontend_prompt
+            })
+
+        @self.mcp.tool()
+        async def create_frontend_architecture(
+            main_architecture: str,
+            ux_specification: Optional[str] = "",
+            framework_preference: Optional[Literal["React", "Vue", "Angular", "Svelte", "React Native", "Flutter", ""]] = "",
+            component_strategy: Literal["atomic", "modular", "feature-based", "layered"] = "atomic",
+            state_management: Optional[Literal["Redux", "Zustand", "Context API", "Vuex", "Pinia", "NgRx", ""]] = ""
+        ) -> Dict[str, Any]:
+            """Generate frontend-specific architecture specifications."""
+            tool_instance = CreateFrontendArchitectureTool(self.state_manager, self.crewai_config)
+            return await tool_instance.execute({
+                "main_architecture": main_architecture,
+                "ux_specification": ux_specification,
+                "framework_preference": framework_preference,
+                "component_strategy": component_strategy,
+                "state_management": state_management
+            })
+
+        # --- Story Tools ---
+        @self.mcp.tool()
+        async def create_next_story(
+            prd_content: str,
+            architecture_content: str,
+            current_progress: Optional[CurrentProgress] = None, # Pydantic model
+            story_type: Literal["feature", "bug", "technical", "research", "epic"] = "feature",
+            priority: Literal["low", "medium", "high", "critical"] = "medium"
+        ) -> Dict[str, Any]:
+            """Generate development-ready user stories from PRD epics."""
+            tool_instance = CreateNextStoryTool(self.state_manager, self.crewai_config)
+            current_progress_dict = current_progress.model_dump() if current_progress else {}
+            return await tool_instance.execute({
+                "prd_content": prd_content,
+                "architecture_content": architecture_content,
+                "current_progress": current_progress_dict,
+                "story_type": story_type,
+                "priority": priority
+            })
+
+        @self.mcp.tool()
+        async def validate_story(
+            story_content: str,
+            checklist_types: Optional[List[Literal["story_draft_checklist", "story_dod_checklist", "story_review_checklist"]]] = None,
+            validation_mode: Literal["strict", "standard", "lenient"] = "standard",
+            story_phase: Literal["draft", "review", "ready", "in_progress", "done"] = "draft"
+        ) -> Dict[str, Any]:
+            """Validate user stories against Definition of Done checklists."""
+            tool_instance = ValidateStoryTool(self.state_manager, self.crewai_config)
+            return await tool_instance.execute({
+                "story_content": story_content,
+                "checklist_types": checklist_types or ["story_draft_checklist"], # Default if None
+                "validation_mode": validation_mode,
+                "story_phase": story_phase
+            })
+
+        # --- Validation Tools ---
+        @self.mcp.tool()
+        async def run_checklist(
+            document_content: str,
+            checklist_name: ChecklistType, # Enum
+            validation_context: Optional[ValidationContext] = None, # Pydantic model
+            validation_mode: Literal["strict", "standard", "lenient"] = "standard"
+        ) -> Dict[str, Any]:
+            """Execute BMAD quality checklists against documents."""
+            tool_instance = RunChecklistTool(self.state_manager, self.crewai_config)
+            validation_context_dict = validation_context.model_dump() if validation_context else {}
+            return await tool_instance.execute({
+                "document_content": document_content,
+                "checklist_name": checklist_name.value, # Pass enum value
+                "validation_context": validation_context_dict,
+                "validation_mode": validation_mode
+            })
+
+        @self.mcp.tool()
+        async def correct_course(
+            current_situation: str,
+            desired_outcome: str,
+            change_context: ChangeContext, # Pydantic model
+            existing_artifacts: Optional[List[str]] = None,
+            constraints: Optional[List[str]] = None
+        ) -> Dict[str, Any]:
+            """Handle change management scenarios and course corrections."""
+            tool_instance = CorrectCourseTool(self.state_manager, self.crewai_config)
+            return await tool_instance.execute({
+                "current_situation": current_situation,
+                "desired_outcome": desired_outcome,
+                "change_context": change_context.model_dump(), # Pass as dict
+                "existing_artifacts": existing_artifacts or [],
+                "constraints": constraints or []
+            })
         
-        # Register planning tools
-        self._register_tool(CreateProjectBriefTool(self.state_manager))
-        self._register_tool(GeneratePRDTool(self.state_manager))
-        self._register_tool(ValidateRequirementsTool(self.state_manager))
-        
-        # Register architecture tools
-        self._register_tool(CreateArchitectureTool(self.state_manager))
-        self._register_tool(CreateFrontendArchitectureTool(self.state_manager))
-        
-        # Register story tools
-        self._register_tool(CreateNextStoryTool(self.state_manager))
-        self._register_tool(ValidateStoryTool(self.state_manager))
-        
-        # Register validation tools
-        self._register_tool(RunChecklistTool(self.state_manager))
-        self._register_tool(CorrectCourseTool(self.state_manager))
-        
-        logger.info(f"Registered {len(self.tools)} BMAD tools")
-    
-    def _register_tool(self, tool: BMadTool) -> None:
-        """Register a single tool with the MCP server."""
-        self.tools[tool.name] = tool
-        
-        # Create MCP tool wrapper
-        @self.mcp.tool(
-            name=tool.name,
-            description=tool.description,
-            schema=tool.get_input_schema()
-        )
-        async def mcp_tool_wrapper(**kwargs):
-            try:
-                # Validate input
-                validated_args = tool.validate_input(kwargs)
-                
-                # Execute tool
-                result = await tool.execute(validated_args)
-                
-                logger.info(f"Tool {tool.name} executed successfully")
-                return result
-                
-            except Exception as e:
-                logger.error(f"Tool {tool.name} execution failed: {e}")
-                raise
-        
-        # Store reference to wrapper for potential cleanup
-        setattr(self, f"_tool_wrapper_{tool.name}", mcp_tool_wrapper)
-        
-        logger.debug(f"Registered tool: {tool.name}")
-    
+        logger.info(f"Registered tools.")
+
     async def run_stdio(self) -> None:
         """Run the server in stdio mode."""
         logger.info("Starting BMAD MCP Server in stdio mode")
         
         try:
-            # FastMCP handles stdio communication
-            await self.mcp.run_stdio()
+            # Use FastMCP's async stdio runner
+            await self.mcp.run_stdio_async()
         except KeyboardInterrupt:
             logger.info("Server stopped by user")
         except Exception as e:
@@ -165,33 +277,14 @@ class BMadMCPServer:
         logger.info(f"Starting BMAD MCP Server in SSE mode on {host}:{port}")
         
         try:
-            # FastMCP handles SSE communication
-            await self.mcp.run_sse(host=host, port=port)
+            # Use FastMCP's async HTTP runner
+            await self.mcp.run_http_async(transport="streamable-http", host=host, port=port)
         except KeyboardInterrupt:
             logger.info("Server stopped by user")
         except Exception as e:
             logger.error(f"Server error in SSE mode: {e}")
             raise
-    
-    def get_tool_info(self) -> List[Dict[str, Any]]:
-        """Get information about all registered tools."""
-        return [tool.get_tool_info() for tool in self.tools.values()]
-    
-    def get_server_info(self) -> Dict[str, Any]:
-        """Get server information and status."""
-        return {
-            "name": "BMAD MCP Server",
-            "version": "1.0.0",
-            "project_root": str(self.project_root),
-            "bmad_dir": str(self.state_manager.get_bmad_dir()),
-            "registered_tools": len(self.tools),
-            "tool_names": list(self.tools.keys()),
-            "config": {
-                "log_level": self.config.get("log_level"),
-                "max_concurrent_tools": self.config.get("max_concurrent_tools"),
-                "tool_timeout_seconds": self.config.get("tool_timeout_seconds")
-            }
-        }
+
     
     async def shutdown(self) -> None:
         """Gracefully shutdown the server."""

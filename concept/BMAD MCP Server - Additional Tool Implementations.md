@@ -96,12 +96,13 @@ class GeneratePRDTool(BMadTool):
     
     This tool transforms project briefs into detailed Product Requirements Documents
     with well-structured epics, user stories, and technical guidance.
+    It returns the generated content for the assistant to handle.
     """
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, state_manager=None): # Added state_manager
+        super().__init__(state_manager)    # Pass state_manager to base
         self.category = "planning"
-        self.description = "Generate comprehensive PRD with epics and user stories from project brief"
+        self.description = "Generates content for a comprehensive PRD with epics and user stories from project brief. Does not write files."
     
     def get_input_schema(self) -> Dict[str, Any]:
         """Get input schema for PRD generation."""
@@ -133,32 +134,25 @@ class GeneratePRDTool(BMadTool):
             "required": ["project_brief"]
         }
     
-    async def execute(self, arguments: Dict[str, Any]) -> str:
-        """Execute PRD generation."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]: # Returns Dict
+        """Execute PRD generation and return content and suggestions."""
         validated_args = self.validate_input(arguments)
+        
+        project_brief_content = validated_args["project_brief"]
         
         # Create and configure flow
         flow = PRDGenerationFlow()
-        flow.state.project_brief = validated_args["project_brief"]
+        flow.state.project_brief = project_brief_content
         flow.state.workflow_mode = validated_args.get("workflow_mode", "incremental")
         flow.state.technical_depth = validated_args.get("technical_depth", "standard")
         
         # Execute the flow
-        result = flow.kickoff()
+        flow.kickoff() # kickoff is synchronous in the example, result is in flow.state
         
-        # Format the final PRD
-        formatted_prd = self._format_prd(
-            flow.state.prd_content,
-            validated_args.get("include_architecture_prompt", True)
-        )
+        prd_content = flow.state.prd_content
         
-        return formatted_prd
-    
-    def _format_prd(self, content: str, include_arch_prompt: bool) -> str:
-        """Format PRD with proper structure and prompts."""
-        formatted = content
-        
-        if include_arch_prompt:
+        # Optionally add architect prompt if requested
+        if validated_args.get("include_architecture_prompt", True):
             arch_prompt = """
 ---
 
@@ -175,11 +169,36 @@ Based on the requirements analysis above, please create a comprehensive technica
 
 Use the BMAD architecture template and ensure the design enables efficient development execution by AI agents following the defined epics and stories.
 """
-            formatted += arch_prompt
-        
-        formatted += "\n\n---\n*Generated using BMAD MCP Server - PRD Generation Tool*"
-        return formatted
+            prd_content += arch_prompt
 
+        # Determine a suggested path (example, can be more sophisticated)
+        # Extracting a title or topic from the brief for the filename
+        brief_title_line = project_brief_content.split('\n', 1)[0]
+        safe_title = brief_title_line.replace("#", "").strip().lower().replace(' ', '_').replace(':', '').replace('/', '_')
+        if not safe_title or len(safe_title) > 50: # Fallback for very long or empty titles
+            safe_title = "prd_document"
+        
+        suggested_path = f"prd/{safe_title}.md"
+
+        suggested_metadata = {
+            "artifact_type": "prd",
+            "status": "draft",
+            "workflow_mode": flow.state.workflow_mode,
+            "technical_depth": flow.state.technical_depth,
+            "epics_count": flow.state.epics_count,
+            "generated_by_tool": self.name,
+            "timestamp": datetime.now().isoformat() # Added import for datetime
+        }
+        
+        return {
+            "content": prd_content,
+            "suggested_path": suggested_path,
+            "metadata": suggested_metadata,
+            "message": "PRD content generated. Please review and save."
+        }
+
+    # _format_prd method is integrated into execute or handled by CrewAI agent's expected output.
+    # The footer "*Generated using BMAD MCP Server...*" should be omitted as the server isn't writing the file.
 
 # bmad-mcp-server/src/bmad_mcp_server/tools/validation/run_checklist.py
 """
@@ -208,12 +227,13 @@ class RunChecklistTool(BMadTool):
     
     This tool runs any BMAD checklist against provided documents and generates
     detailed validation reports with specific recommendations for improvement.
+    The report content is returned to the assistant.
     """
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, state_manager=None): # Added state_manager
+        super().__init__(state_manager)    # Pass state_manager to base
         self.category = "validation"
-        self.description = "Execute BMAD quality checklists against documents"
+        self.description = "Executes BMAD quality checklists against documents and returns the validation report. Does not write files."
     
     def get_input_schema(self) -> Dict[str, Any]:
         """Get input schema for checklist execution."""
@@ -249,37 +269,62 @@ class RunChecklistTool(BMadTool):
             "required": ["document_content", "checklist_name"]
         }
     
-    async def execute(self, arguments: Dict[str, Any]) -> str:
-        """Execute checklist validation."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]: # Returns Dict
+        """Execute checklist validation and return report content."""
         validated_args = self.validate_input(arguments)
         
         document_content = validated_args["document_content"]
-        checklist_name = validated_args["checklist_name"]
+        checklist_name_str = validated_args["checklist_name"]
+        # Ensure checklist_name is a string, as ChecklistType enum might be passed if schema is not strictly enforced by client
+        checklist_name = checklist_name_str if isinstance(checklist_name_str, str) else checklist_name_str.value
+
         validation_context = validated_args.get("validation_context", {})
         validation_mode = validated_args.get("validation_mode", "standard")
         
         # Load the checklist
-        checklist = load_checklist(checklist_name)
+        checklist_data = load_checklist(checklist_name) # load_checklist is from ...checklists.loader
         
         # Execute checklist against document
-        validation_result = execute_checklist(
-            checklist=checklist,
+        validation_result_data = execute_checklist( # execute_checklist is from ...checklists.loader
+            checklist=checklist_data,
             document_content=document_content,
             context=validation_context,
             mode=validation_mode
         )
         
-        # Format the validation report
-        report = self._format_validation_report(
+        # Format the validation report (this internal formatting is fine)
+        report_content = self._format_validation_report(
             checklist_name=checklist_name,
-            validation_result=validation_result,
+            validation_result=validation_result_data,
             document_length=len(document_content)
         )
         
-        return report
+        # Determine a suggested path
+        # Example: validation_report_pm_checklist_on_mydoc.md
+        # This requires knowing the original document's name, which is not in args.
+        # So, a generic name or one based on checklist.
+        safe_checklist_name = checklist_name.lower().replace(' ', '_')
+        suggested_path = f"checklists/validation_report_{safe_checklist_name}.md"
+
+        suggested_metadata = {
+            "artifact_type": "validation_report",
+            "status": "completed", # Reports are typically complete once generated
+            "checklist_used": checklist_name,
+            "validation_mode": validation_mode,
+            "pass_rate": (validation_result_data.get("passed_items", 0) / validation_result_data.get("total_items", 1) * 100),
+            "generated_by_tool": self.name,
+            "timestamp": datetime.now().isoformat() # Added import for datetime
+        }
+
+        return {
+            "content": report_content,
+            "suggested_path": suggested_path,
+            "metadata": suggested_metadata,
+            "message": f"Validation report for checklist '{checklist_name}' generated. Please review and save."
+        }
     
     def _format_validation_report(self, checklist_name: str, validation_result: Dict, document_length: int) -> str:
-        """Format checklist validation report."""
+        """Format checklist validation report. (Internal helper, footer will be removed)"""
         
         total_items = validation_result.get("total_items", 0)
         passed_items = validation_result.get("passed_items", 0)
@@ -312,7 +357,6 @@ class RunChecklistTool(BMadTool):
         else:
             report += "🔴 **REQUIRES REVISION** - Significant improvements needed before proceeding"
         
-        # Add detailed findings
         if validation_result.get("failed_items_details"):
             report += "\n\n### Failed Items Requiring Attention\n"
             for i, item in enumerate(validation_result["failed_items_details"], 1):
@@ -320,13 +364,11 @@ class RunChecklistTool(BMadTool):
                 if item.get("recommendation"):
                     report += f"   *Recommendation:* {item['recommendation']}\n"
         
-        # Add recommendations
         if validation_result.get("recommendations"):
             report += "\n\n### Specific Recommendations\n"
             for i, rec in enumerate(validation_result["recommendations"], 1):
                 report += f"{i}. {rec}\n"
         
-        # Add next steps
         report += f"\n\n### Next Steps\n"
         if pass_rate >= 80:
             report += "- Document is ready for next phase\n"
@@ -336,8 +378,8 @@ class RunChecklistTool(BMadTool):
             report += "- Re-run validation after improvements\n"
             report += "- Consider consulting BMAD methodology documentation\n"
         
-        report += "\n---\n*Generated using BMAD MCP Server - Checklist Validation Tool*"
-        return report
+        # Removed the footer: "*Generated using BMAD MCP Server - Checklist Validation Tool*"
+        return report.strip()
 
 
 # bmad-mcp-server/src/bmad_mcp_server/tools/architecture/create_architecture.py
@@ -460,12 +502,13 @@ class CreateArchitectureTool(BMadTool):
     
     This tool creates comprehensive architecture documents with technology selections,
     component designs, and implementation guidance optimized for AI agent development.
+    It returns the generated content for the assistant to handle.
     """
     
-    def __init__(self):
-        super().__init__()
+    def __init__(self, state_manager=None): # Added state_manager
+        super().__init__(state_manager)    # Pass state_manager to base
         self.category = "architecture"
-        self.description = "Generate comprehensive technical architecture from PRD requirements"
+        self.description = "Generates content for a comprehensive technical architecture from PRD requirements. Does not write files."
     
     def get_input_schema(self) -> Dict[str, Any]:
         """Get input schema for architecture creation."""
@@ -505,32 +548,25 @@ class CreateArchitectureTool(BMadTool):
             "required": ["prd_content"]
         }
     
-    async def execute(self, arguments: Dict[str, Any]) -> str:
-        """Execute architecture generation."""
+    async def execute(self, arguments: Dict[str, Any]) -> Dict[str, Any]: # Returns Dict
+        """Execute architecture generation and return content and suggestions."""
         validated_args = self.validate_input(arguments)
         
+        prd_content_input = validated_args["prd_content"]
+
         # Create and configure flow
         flow = ArchitectureGenerationFlow()
-        flow.state.prd_content = validated_args["prd_content"]
+        flow.state.prd_content = prd_content_input
         flow.state.tech_preferences = validated_args.get("tech_preferences", {})
         flow.state.architecture_type = validated_args.get("architecture_type", "monolith")
         
         # Execute the flow
-        result = flow.kickoff()
+        flow.kickoff() # kickoff is synchronous, result in flow.state
         
-        # Format the final architecture
-        formatted_arch = self._format_architecture(
-            flow.state.architecture_content,
-            validated_args.get("include_frontend_prompt", True)
-        )
+        architecture_content = flow.state.architecture_content
         
-        return formatted_arch
-    
-    def _format_architecture(self, content: str, include_frontend_prompt: bool) -> str:
-        """Format architecture document with proper structure."""
-        formatted = content
-        
-        if include_frontend_prompt and "frontend" in content.lower():
+        # Optionally add frontend prompt if requested
+        if validated_args.get("include_frontend_prompt", True) and "frontend" in architecture_content.lower():
             frontend_prompt = """
 ---
 
@@ -547,11 +583,32 @@ Based on the main architecture document above, please create a comprehensive fro
 
 Use the main architecture's technology stack as the foundation and elaborate on frontend-specific concerns while maintaining consistency with the overall system design.
 """
-            formatted += frontend_prompt
+            architecture_content += frontend_prompt
         
-        formatted += "\n\n---\n*Generated using BMAD MCP Server - Architecture Creation Tool*"
-        return formatted
+        # Determine a suggested path
+        # Example: architecture_document_monolith.md
+        arch_type_suffix = flow.state.architecture_type.lower().replace(' ', '_')
+        suggested_path = f"architecture/architecture_document_{arch_type_suffix}.md"
 
+        suggested_metadata = {
+            "artifact_type": "architecture_document",
+            "status": "draft",
+            "architecture_type": flow.state.architecture_type,
+            "complexity_score": flow.state.complexity_score,
+            "tech_preferences_used": flow.state.tech_preferences,
+            "generated_by_tool": self.name,
+            "timestamp": datetime.now().isoformat() # Added import for datetime
+        }
+
+        return {
+            "content": architecture_content,
+            "suggested_path": suggested_path,
+            "metadata": suggested_metadata,
+            "message": "Architecture document content generated. Please review and save."
+        }
+
+    # _format_architecture method is integrated into execute or handled by CrewAI agent.
+    # The footer "*Generated using BMAD MCP Server...*" should be omitted.
 
 # bmad-mcp-server/src/bmad_mcp_server/checklists/loader.py
 """
