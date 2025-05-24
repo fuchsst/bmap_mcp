@@ -16,6 +16,8 @@ Most AI assistants that support MCP require you to specify how to connect to an 
     -   For SSE: The URL of the server's MCP endpoint (e.g., `http://localhost:8000/mcp` if the server is running locally on port 8000).
 -   **Scope**: Configuration can often be project-specific (shared with a team via a config file in the repo) or user-specific (global to your IDE setup).
 
+**Note that there seems to be a bug in the used FastMCP library. stdio does not work at the moment!**
+
 ## Cline
 
 Cline provides a user interface within your IDE (e.g., VS Code extension) for managing MCP servers.
@@ -71,15 +73,15 @@ In your `cline_mcp_settings.json`:
 ```json
 {
   "mcpServers": {
-    "bmad-mcp-server-sse": {
-      "url": "http://localhost:8000/mcp", // Default MCP path for FastMCP SSE
-      "headers": {
-        // "Authorization": "Bearer your-token" // If your server requires auth
-      },
-      "disabled": false
+    "BMAD": {
+      "url": "http://localhost:8081/sse",
+      "disabled": false,
+      "autoApprove": [],
+      "timeout": 300000
     }
   }
 }
+
 ```
 
 ### Using BMAD Tools with Cline:
@@ -120,7 +122,7 @@ Claude Code uses a CLI command `claude mcp add` to configure servers.
     #### SSE Mode:
     If the server is running via Docker or locally in SSE mode (e.g., on `http://localhost:8000`):
     ```bash
-    claude mcp add --transport sse bmad-server-sse http://localhost:8000/mcp
+    claude mcp add --transport sse bmad-server-sse http://localhost:8000/sse
     ```
     -   Use `-s project` or `-s user` as needed.
 
@@ -181,7 +183,7 @@ GitHub Copilot looks for MCP server configurations in a `.vscode/mcp.json` file 
     {
       "servers": {
         "bmad-mcp-server-sse": {
-          "url": "http://localhost:8000/mcp", // Default MCP path for FastMCP SSE
+          "url": "http://localhost:8000/sse", // Default MCP path for FastMCP SSE
           "transport": "sse" // Explicitly state transport for URL-based servers
           // "headers": { "Authorization": "Bearer your_token" } // If auth is needed
         }
